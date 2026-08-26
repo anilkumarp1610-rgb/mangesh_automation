@@ -39,7 +39,19 @@ downstream reporting/auditing.
         ┌────────────────────────────────────────────────────┐
         │ Step 5: Generate output CSV  (export_invoices_csv.py)  │
         │   joins invoice_summary/detail/line_detail/service/       │
-        │   charge into one denormalized CSV                          │
+        │   charge into one denormalized CSV; file name = Output.      │
+        │   FileName + ddMMyyyy_hhmmss timestamp (see §4)                │
+        └──────────┬───────────────────────────────────────────────────┘
+                    ▼
+        ┌────────────────────────────────────────────────────┐
+        │ Step 6: Upload to SFTP  (delivery.py::upload_to_sftp)  │
+        │   puts the CSV onto Sftp.RemoteDirectory; logs outcome    │
+        └──────────┬───────────────────────────────────────────────┘
+                    ▼
+        ┌────────────────────────────────────────────────────┐
+        │ Step 7: Send email  (delivery.py::send_success_email)  │
+        │   Email.* template, CSV attached; logs outcome. On any    │
+        │   failure in Step 5/6/7, send_failure_email() fires instead │
         └────────────────────────────────────────────────────┘
 ```
 
@@ -60,7 +72,8 @@ mangesh_automation/
 │   ├── repository.py          all DB write functions
 │   ├── process_invoices.py    main orchestrator (entry point)
 │   ├── fetch_ap_invoices.py   standalone ap_invoices reader
-│   └── export_invoices_csv.py joins all invoice tables into one CSV
+│   ├── export_invoices_csv.py joins all invoice tables into one timestamped CSV
+│   └── delivery.py            Steps 6-7: SFTP upload + success/failure email
 ├── dags/
 │   └── invoice_sync_dag.py    Airflow DAG that runs process_invoices.main()
 ├── sql/
@@ -97,9 +110,9 @@ re-processing the same invoice never creates duplicate line items.
 
 | File | Role |
 |---|---|
-| `config/appsettings.yml` | All configuration — MySQL connection, API base URI, Authentication section, GetInvoice section |
+| `config/appsettings.yml` | All configuration — MySQL connection, API base URI, Authentication section, GetInvoice section, output/job naming, SFTP, and email templates |
 | `config/field_maps.yml` | API field (camelCase) → DB column (snake_case) mappings for Summary / Detail / Service / Charge |
-| `scripts/config.py` | Loads `config/appsettings.yml` into typed dataclasses (`AppConfig`, `MySqlConfig`, `InvoiceApiConfig`, `AuthenticationConfig`, `GetInvoiceConfig`, `LoggingConfig`) |
+| `scripts/config.py` | Loads `config/appsettings.yml` into typed dataclasses (`AppConfig`, `MySqlConfig`, `InvoiceApiConfig`, `AuthenticationConfig`, `GetInvoiceConfig`, `LoggingConfig`, `JobConfig`, `SftpConfig`, `EmailConfig`) |
 | `scripts/logging_config.py` | `setup_logging(cfg)` — configures one timestamped log file per run plus console output |
 | `scripts/field_maps.py` | Loads `config/field_maps.yml`, exposes `SUMMARY_FIELD_MAP` / `DETAIL_FIELD_MAP` / `SERVICE_FIELD_MAP` / `CHARGE_FIELD_MAP` and `map_record()` |
 | `scripts/db.py` | `get_connection(cfg)` — raw `mysql.connector` connection (used for transactional multi-table writes) |
@@ -108,7 +121,8 @@ re-processing the same invoice never creates duplicate line items.
 | `scripts/repository.py` | All DB write functions (see §5) |
 | `scripts/process_invoices.py` | Main orchestrator — entry point for the full pipeline |
 | `scripts/fetch_ap_invoices.py` | Standalone helper — reads `ap_invoices` into a pandas DataFrame (ad hoc use / debugging) |
-| `scripts/export_invoices_csv.py` | Joins `invoice_summary` → `invoice_detail` → `invoice_line_detail` → `invoice_service` → `invoice_charge` and writes one combined CSV to the configured output folder |
+| `scripts/export_invoices_csv.py` | Joins `invoice_summary` → `invoice_detail` → `invoice_line_detail` → `invoice_service` → `invoice_charge` and writes one combined, timestamped CSV to the configured output folder |
+| `scripts/delivery.py` | Step 6: `upload_to_sftp()` puts the CSV on the SFTP server; Step 7: `send_success_email()` / `send_failure_email()` send the configured email template with the CSV attached. Both log their outcome. |
 | `dags/invoice_sync_dag.py` | Airflow DAG — schedules `scripts/process_invoices.py:main()` as a `PythonOperator` task |
 | `sql/create_tables.sql` | Full DDL for all 7 tables + seed rows for `ap_invoices` |
 | `sql/create_invoice_response_log.sql` | Standalone DDL for just `invoice_response_log` |
@@ -169,10 +183,70 @@ Output:
     - Name: invoice_charge
       JoinOn: service_pk
       Query: SELECT * FROM invoice_charge
+
+Jobs:
+  CBTS_AP:
+    OutputPrefix: CBTS_AP_output
+
+Sftp:
+  Host: sftp.example.net
+  Port: 22
+  Username: ${SFTP_USERNAME}
+  Password: ${SFTP_PASSWORD}
+  RemoteDirectory: /Test/Airflow_Output/
+
+Email:
+  Enabled: true
+  Smtp:
+    Host: smtp.example.org
+    Port: 25
+    Username: ${SMTP_USERNAME}
+    Password: ${SMTP_PASSWORD}
+    UseTls: true
+  Sender:
+    Email: it-team@example.com
+    Name: AP Automation
+  Recipients:
+    To: [ops-team@example.com]
+    Cc: []
+  Subject: "SFTP File Upload Successful - {filename}"
+  Body: |
+    Hello Team,
+    The file {filename} has been successfully uploaded to the SFTP server.
+    Upload Time: {upload_time}
+  Attachment:
+    Enabled: true
+    FileName: "{filename}"
+  FailureNotification:
+    Enabled: true
+    Subject: "SFTP File Upload Failed - {filename}"
+    Body: |
+      Hello Team,
+      The file upload to the SFTP server has failed.
+      File Name: {filename}
+      Failure Time: {failure_time}
+      Error Details: {error_message}
+    Recipients:
+      To: [ops-team@example.com]
+      Cc: []
 ```
 
 > **Before running the pipeline**, replace `ClientApiKey`, `LoginUserName`, and
 > `Password` under `Authentication` with real credentials for the Invoice API.
+> `Sftp.Username`/`Sftp.Password` and `Email.Smtp.Username`/`Email.Smtp.Password`
+> are read from the environment via `${VAR_NAME}` placeholders (expanded by
+> `config.py::_expand_env`) rather than stored in plain text — set
+> `SFTP_USERNAME`, `SFTP_PASSWORD`, `SMTP_USERNAME`, `SMTP_PASSWORD` in the
+> environment before running.
+
+`Jobs.<JobName>.OutputPrefix` is looked up by `scripts/config.py::load_config()`
+under the fixed key `CBTS_AP` and exposed as `cfg.job.output_prefix`; it's
+prepended to the generated CSV file name (see below). `Sftp.*` configures the
+Step 6 upload (`scripts/delivery.py::upload_to_sftp`) via `paramiko`. `Email.*`
+configures Step 7 (`scripts/delivery.py::send_success_email` /
+`send_failure_email`) — `{filename}`, `{upload_time}`, `{failure_time}`, and
+`{error_message}` are substituted into `Subject`/`Body`/`Attachment.FileName` at
+send time. `Email.Enabled: false` skips sending entirely.
 
 `Logging.Folder` follows the same relative/absolute resolution rules as
 `Output.Folder` (see below); `Logging.Level` is any standard Python logging level
@@ -180,8 +254,15 @@ name (`DEBUG`, `INFO`, `WARNING`, `ERROR`) and defaults to `INFO` if omitted.
 
 `Output.Folder` may be relative (resolved against the project root, e.g. `output` →
 `<project_root>/output`) or an absolute path; it's created automatically if it
-doesn't exist. `Output.FileName` is the single combined CSV file name written by
-`scripts/export_invoices_csv.py`.
+doesn't exist. `Output.FileName` is the **base** name for the combined CSV; the
+file actually written by `scripts/export_invoices_csv.py::export_invoices_csv()`
+is always named
+`<Jobs.CBTS_AP.OutputPrefix>_<base>_<ddMMyyyy_hhmmss>.csv` (e.g. `Output.FileName:
+invoices_export.csv` → `CBTS_AP_output_invoices_export_26082026_174309.csv`), so
+every run produces a distinct file instead of overwriting the previous one. This
+exact file name (via `os.path.basename()` of the returned path) is what gets
+uploaded to SFTP and referenced in the email template's `{filename}` — see
+`build_export_filename()` in `scripts/export_invoices_csv.py`.
 
 `Output.Tables` drives the CSV join entirely from config — no table names or SQL
 are hardcoded in `export_invoices_csv.py`. The first entry is the base table,
@@ -282,7 +363,12 @@ diagram, so a run's log file (or console output) reads as a step-by-step trace.
   outcome, logs a final `N SUCCESS, N PENDING, N FAILED` summary, rolls back the
   whole DB portion of the run on any unhandled exception (logged via
   `logger.exception` first), then — after the DB connection is closed — runs
-  **Step 5** (`export_invoices_csv(cfg)`, reusing the already-loaded config).
+  **Step 5** (`export_invoices_csv(cfg)`, reusing the already-loaded config),
+  **Step 6** (`upload_to_sftp`) and **Step 7** (`send_success_email`) using the
+  exact file name `export_invoices_csv()` returned. If Step 5, 6, or 7 raises,
+  the exception is logged and `send_failure_email(cfg.email, output_filename,
+  error)` is sent (best-effort — its own failure is logged but does not mask
+  the original error) before re-raising.
   **This is the function to run/schedule** — invoked directly via
   `python scripts/process_invoices.py` or by the Airflow DAG
   (`dags/invoice_sync_dag.py`).
@@ -293,8 +379,13 @@ diagram, so a run's log file (or console output) reads as a step-by-step trace.
 
 ### `scripts/export_invoices_csv.py`
 - `get_engine(cfg: MySqlConfig)` — SQLAlchemy engine (password URL-encoded).
-- `resolve_output_path(cfg: AppConfig) -> str` — resolves `Output.Folder`/`Output.FileName`
-  from config into an absolute path, creating the folder if needed.
+- `build_export_filename(cfg: AppConfig, timestamp: datetime | None = None) -> str` —
+  builds the actual CSV file name: `Output.FileName`'s base + `_<ddMMyyyy_hhmmss>`
+  + its extension, prefixed with `Jobs.CBTS_AP.OutputPrefix` + `_` when set.
+  `timestamp` defaults to `datetime.now()`; overridable for tests.
+- `resolve_output_path(cfg: AppConfig, filename: str | None = None) -> str` —
+  resolves `Output.Folder` (defaulting `filename` to `Output.FileName` verbatim
+  if not given) into an absolute path, creating the folder if needed.
 - `build_invoice_export(engine, tables: list[ExportTableConfig]) -> pd.DataFrame` —
   driven entirely by `Output.Tables` from config (no table names or SQL
   hardcoded): runs the first (base) table's `Query` as-is, then for each
@@ -305,11 +396,35 @@ diagram, so a run's log file (or console output) reads as a step-by-step trace.
   collide with an existing column are suffixed `_<table name>`. Logs which table
   it's reading/joining as it goes.
 - `export_invoices_csv(cfg: AppConfig | None = None) -> str` — **Step 5**. Runs
-  the join and writes it to the resolved output path via
-  `DataFrame.to_csv(index=False)`; logs the row count written; returns the path
-  written. Accepts an already-loaded `cfg` (used by `process_invoices.py::main()`
-  to avoid re-reading `appsettings.yml`) or loads its own via `load_config()` when
-  called standalone (`python scripts/export_invoices_csv.py`).
+  the join and writes it to `resolve_output_path(cfg, build_export_filename(cfg))`
+  via `DataFrame.to_csv(index=False)` — so every run gets its own timestamped
+  file instead of overwriting the last one; logs the row count written; returns
+  the path written. Accepts an already-loaded `cfg` (used by
+  `process_invoices.py::main()` to avoid re-reading `appsettings.yml`) or loads
+  its own via `load_config()` when called standalone
+  (`python scripts/export_invoices_csv.py`).
+
+### `scripts/delivery.py`
+- `upload_to_sftp(cfg: SftpConfig, local_path: str, filename: str) -> str` —
+  **Step 6**. Opens a `paramiko` SFTP connection and puts `local_path` at
+  `Sftp.RemoteDirectory/<filename>`; logs the local/remote paths on success.
+  Raises `RuntimeError` up front if `Sftp.Username`/`Sftp.Password` still contain
+  an unexpanded `${...}` placeholder (i.e. the environment variable was never
+  set).
+- `send_success_email(cfg: EmailConfig, filename: str, output_path: str) -> None` —
+  **Step 7**. Formats `Email.Subject`/`Email.Body` with `{filename}` and
+  `{upload_time}` (UTC, ISO 8601), attaches `output_path` under
+  `Email.Attachment.FileName.format(filename=filename)` when
+  `Email.Attachment.Enabled`, and sends via `Email.Smtp.*`. No-ops if
+  `Email.Enabled` is false.
+- `send_failure_email(cfg: EmailConfig, filename: str, error: Exception) -> None` —
+  formats `Email.FailureNotification.Subject`/`Body` with `{filename}`,
+  `{failure_time}` (UTC, ISO 8601), and `{error_message}` (`str(error)`), and
+  sends to `Email.FailureNotification.Recipients`. No-ops if
+  `Email.FailureNotification.Enabled` is false.
+- `_send_message(...)` (shared by both) — raises `RuntimeError` up front if
+  `Email.Smtp.Username`/`Password` still contain an unexpanded `${...}`
+  placeholder; logs `subject`/`to`/`cc`/`attachment` on successful send.
 
 ### `dags/invoice_sync_dag.py`
 - Adds `scripts/` to `sys.path` and imports `process_invoices.main` as
@@ -337,8 +452,10 @@ response, but skip the detail tables.
 ### 7.1 Prerequisites
 - Python 3.12+
 - MySQL Server running locally with the `airflow` database
-- Network access to the Invoice API `BaseUri`
+- Network access to the Invoice API `BaseUri`, the SFTP host, and the SMTP host
 - Valid `ClientApiKey` / `LoginUserName` / `Password` for the Invoice API
+- `SFTP_USERNAME`, `SFTP_PASSWORD`, `SMTP_USERNAME`, `SMTP_PASSWORD` set in the
+  environment (see §4)
 
 ### 7.2 Install dependencies
 ```bash
@@ -355,13 +472,15 @@ with 10 sample rows (`INV-10001`…`INV-10010`).
 
 ### 7.4 Configure credentials
 Edit `config/appsettings.yml` and fill in the real `ClientApiKey`, `LoginUserName`,
-and `Password` under `InvoiceApi.Authentication`.
+and `Password` under `InvoiceApi.Authentication`; set `SFTP_USERNAME`,
+`SFTP_PASSWORD`, `SMTP_USERNAME`, `SMTP_PASSWORD` in the environment for the
+`${...}`-referenced `Sftp`/`Email.Smtp` credentials (see §4).
 
 ### 7.5 Run the pipeline directly
 ```bash
 python scripts/process_invoices.py
 ```
-This runs all 5 steps in order (see §1 diagram):
+This runs all 7 steps in order (see §1 diagram):
 1. **Step 1** — authenticate once and obtain a bearer token.
 2. **Step 2** — pull every distinct `ap_invoice_number` from `ap_invoices`.
 3. **Step 3** — for each invoice number, call the Get Invoice API and log the raw
@@ -373,7 +492,13 @@ This runs all 5 steps in order (see §1 diagram):
    the entire DB portion of the run if an unhandled error occurs.
 5. **Step 5** — once every invoice has been processed, automatically generates the
    combined CSV export (same as running `scripts/export_invoices_csv.py`
-   manually, see §7.8) to `<Output.Folder>/<Output.FileName>`.
+   manually, see §7.8) to `<Output.Folder>/<Jobs.CBTS_AP.OutputPrefix>_<Output.
+   FileName base>_<ddMMyyyy_hhmmss>.csv`.
+6. **Step 6** — uploads that exact CSV to `Sftp.RemoteDirectory` and logs the
+   result.
+7. **Step 7** — sends the `Email.*` template (CSV attached) and logs the result.
+   If Step 5, 6, or 7 raises, a best-effort `Email.FailureNotification` is sent
+   instead before the original error is re-raised.
 
 Every run prints progress to the terminal **and** writes the same lines to a fresh
 timestamped file at `logs/process_invoices_<YYYYMMDD_HHMMSS>.log` (path from
@@ -404,16 +529,20 @@ in the current query — edit `QUERY` in `scripts/fetch_ap_invoices.py` as neede
 ```bash
 python scripts/export_invoices_csv.py
 ```
-`process_invoices.py` already runs this automatically as its final step (§7.5),
-so this is only needed to **regenerate the CSV on its own** — e.g. after manually
-editing `Output.Tables`, or to refresh the file without re-hitting the Invoice
-API. Reads every table listed under `Output.Tables` in `config/appsettings.yml`
-(default: `invoice_summary`, `invoice_detail`, `invoice_line_detail`,
-`invoice_service`, `invoice_charge`), joins them in the configured order/join-key
-into one denormalized table (one row per charge line), and writes a single CSV to
-`<Output.Folder>/<Output.FileName>` (default: `output/invoices_export.csv`,
-relative to the project root — created automatically if it doesn't exist). Edit
-`Output.Tables` to add/remove/reorder tables in the export without touching code.
+`process_invoices.py` already runs this as part of Steps 5-7 (§7.5), so this is
+only needed to **regenerate a CSV on its own** — e.g. after manually editing
+`Output.Tables`, or to refresh the export without re-hitting the Invoice API or
+triggering an SFTP upload/email. Reads every table listed under `Output.Tables`
+in `config/appsettings.yml` (default: `invoice_summary`, `invoice_detail`,
+`invoice_line_detail`, `invoice_service`, `invoice_charge`), joins them in the
+configured order/join-key into one denormalized table (one row per charge
+line), and writes a single, freshly timestamped CSV to
+`<Output.Folder>/<Jobs.CBTS_AP.OutputPrefix>_<Output.FileName base>_<ddMMyyyy_hhmmss>.csv`
+(default folder `output/`, relative to the project root — created automatically
+if it doesn't exist; e.g. `output/CBTS_AP_output_invoices_export_26082026_174309.csv`).
+Edit `Output.Tables` to add/remove/reorder tables in the export without touching
+code; each run leaves the previous export file(s) in place rather than
+overwriting them.
 
 ## 8. Technical Notes
 

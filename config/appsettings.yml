@@ -50,3 +50,73 @@ Output:
     - Name: invoice_charge
       JoinOn: service_pk
       Query: SELECT * FROM invoice_charge
+
+Jobs:
+  CBTS_AP:
+    OutputPrefix: CBTS_AP_output
+
+Sftp:
+  Host: sftp.###.net
+  Port: 22
+  Username: ${SFTP_USERNAME}
+  Password: ${SFTP_PASSWORD}
+  RemoteDirectory: /Test/Airflow_Output/
+
+Email:
+  Enabled: true
+  Smtp:
+    Host: smtp.###.org
+    Port: 25
+    Username: ${SMTP_USERNAME}
+    Password: ${SMTP_PASSWORD}
+    UseTls: true
+  Sender:
+    Email: it-###-team@###.com
+    Name: AP Automation
+  Recipients:
+    To:
+      - mangesh.shinde@##.com
+    Cc:
+      - mangesh.shinde@sa##kon.com
+  Subject: "SFTP File Upload Successful - {filename}"
+  Body: |
+    Hello Team,
+
+    The file {filename} has been successfully uploaded to the SFTP server.
+
+    Upload Time: {upload_time}
+
+    Please find the attached file.
+
+    Thank you,
+    IT-Integration,
+    ## Inc.
+    (Note: This is an automated message sent from a mailbox, which is not monitored. Please do not reply to it directly.)
+  Attachment:
+    Enabled: true
+    FileName: "{filename}"
+  FailureNotification:
+    Enabled: true
+    Subject: "SFTP File Upload Failed - {filename}"
+    Body: |
+      Hello Team,
+
+      The file upload to the SFTP server has failed.
+
+      File Name: {filename}
+      Failure Time: {failure_time}
+
+      Error Details:
+      {error_message}
+
+      Please review the issue and take the necessary action.
+
+      Thank you,
+      IT-Integration,
+      ## Inc.
+      (Note: This is an automated message sent from a mailbox, which is not monitored. Please do not reply to it directly.)
+    Recipients:
+      To:
+        - mangesh.shinde@##.com
+      Cc:
+        - mangesh.shinde@##.com

@@ -1,5 +1,6 @@
 import logging
 import os
+from datetime import datetime
 from urllib.parse import quote_plus
 
 import pandas as pd
@@ -18,12 +19,21 @@ def get_engine(cfg: MySqlConfig):
     )
 
 
-def resolve_output_path(cfg: AppConfig) -> str:
+def build_export_filename(cfg: AppConfig, timestamp: datetime | None = None) -> str:
+    """Output.FileName from appsettings.yml with a ddMMyyyy_hhmmss timestamp appended,
+    prefixed with Jobs.<job>.OutputPrefix when configured."""
+    timestamp = timestamp or datetime.now()
+    base, ext = os.path.splitext(cfg.output.file_name)
+    stamped = f"{base}_{timestamp.strftime('%d%m%Y_%H%M%S')}{ext or '.csv'}"
+    return f"{cfg.job.output_prefix}_{stamped}" if cfg.job.output_prefix else stamped
+
+
+def resolve_output_path(cfg: AppConfig, filename: str | None = None) -> str:
     folder = cfg.output.folder
     if not os.path.isabs(folder):
         folder = os.path.join(PROJECT_ROOT, folder)
     os.makedirs(folder, exist_ok=True)
-    return os.path.join(folder, cfg.output.file_name)
+    return os.path.join(folder, filename or cfg.output.file_name)
 
 
 def build_invoice_export(engine, tables: list[ExportTableConfig]) -> pd.DataFrame:
@@ -60,7 +70,7 @@ def export_invoices_csv(cfg: AppConfig | None = None) -> str:
     finally:
         engine.dispose()
 
-    output_path = resolve_output_path(cfg)
+    output_path = resolve_output_path(cfg, build_export_filename(cfg))
     export_df.to_csv(output_path, index=False)
     logger.info("Export: wrote %d row(s) to %s", len(export_df), output_path)
     return output_path

@@ -1,10 +1,12 @@
 import logging
+import os
 
 import pandas as pd
 
 from auth_client import authenticate
 from config import load_config
 from db import get_connection
+from delivery import send_failure_email, send_success_email, upload_to_sftp
 from export_invoices_csv import export_invoices_csv
 from invoice_client import get_invoice
 from logging_config import setup_logging
@@ -141,11 +143,21 @@ def main() -> None:
         conn.close()
 
     logger.info("Step 5: generating output CSV")
+    output_filename = cfg.output.file_name
     try:
         output_path = export_invoices_csv(cfg)
+        output_filename = os.path.basename(output_path)
         logger.info("Step 5: CSV export written to %s", output_path)
-    except Exception:
-        logger.exception("Step 5: CSV export failed")
+        logger.info("Step 6: uploading %s to SFTP", output_filename)
+        upload_to_sftp(cfg.sftp, output_path, output_filename)
+        logger.info("Step 7: sending success email for %s", output_filename)
+        send_success_email(cfg.email, output_filename, output_path)
+    except Exception as error:
+        logger.exception("Step 5/6/7: export, SFTP delivery, or email failed")
+        try:
+            send_failure_email(cfg.email, output_filename, error)
+        except Exception:
+            logger.exception("Failure notification could not be sent")
         raise
 
 
