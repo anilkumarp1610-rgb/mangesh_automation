@@ -1,0 +1,52 @@
+Logging:
+  Folder: logs
+  Level: INFO
+
+MySql:
+  Host: localhost
+  User: sa
+  Password: Augday@11
+  Database: airflow
+
+InvoiceApi:
+  BaseUri: https://gatewayinternal.testapps.com
+
+  Authentication:
+    Endpoint: /api/v2/Authenticate
+    ClientApiKey: REPLACE_WITH_CLIENT_API_KEY
+    LoginUserName: REPLACE_WITH_LOGIN_USERNAME
+    Password: REPLACE_WITH_LOGIN_PASSWORD
+
+  GetInvoice:
+    Endpoint: /api/v2/invoices
+    InvoiceStatus: Approved
+    PageSize: 50
+    Expand: true
+
+Output:
+  Folder: output
+  FileName: invoices_export.csv
+
+  # Tables combined into the single export CSV, in join order. The first entry is
+  # the base table (its JoinOn is ignored); every entry after that is left-joined
+  # onto the running result using its own JoinOn column.
+  # Query is optional: if omitted, it defaults to "SELECT * FROM <Name>". Set it to
+  # any valid SQL string to select specific columns (or add WHERE/ORDER BY/etc.) --
+  # it is run verbatim, so it MUST still return the JoinOn column for that entry
+  # (except the base table, which has no JoinOn requirement).
+  Tables:
+    - Name: invoice_summary
+      JoinOn:
+      Query: SELECT * FROM invoice_summary
+    - Name: invoice_detail
+      JoinOn: invoice_id
+      Query: SELECT * FROM invoice_detail
+    - Name: invoice_line_detail
+      JoinOn: detail_id
+      Query: SELECT * FROM invoice_line_detail
+    - Name: invoice_service
+      JoinOn: line_detail_id
+      Query: SELECT * FROM invoice_service
+    - Name: invoice_charge
+      JoinOn: service_pk
+      Query: SELECT * FROM invoice_charge
