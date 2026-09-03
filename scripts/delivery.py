@@ -13,8 +13,11 @@ logger = logging.getLogger(__name__)
 
 
 def upload_to_sftp(cfg: SftpConfig, local_path: str, filename: str) -> str:
-    if "${" in cfg.username or "${" in cfg.password:
-        raise RuntimeError("SFTP credentials are not configured in the environment")
+    if not cfg.host or not cfg.username or not cfg.password or "${" in cfg.username or "${" in cfg.password:
+        raise RuntimeError(
+            "SFTP is not configured (host/username/password missing) -- check "
+            "interfaceconfiguration.SFTP_* for this interface, or Sftp.* in appsettings.yml"
+        )
 
     transport = paramiko.Transport((cfg.host, cfg.port))
     try:

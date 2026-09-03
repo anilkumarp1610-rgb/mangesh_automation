@@ -13,6 +13,10 @@ if SCRIPTS_DIR not in sys.path:
 
 from process_invoices import main as run_invoice_sync  # noqa: E402
 
+# interfaceconfiguration.InterfaceId to process. Add another DAG (or parameterize
+# this one) if more interfaces need their own schedule.
+INTERFACE_ID = 1
+
 default_args = {
     "owner": "mangesh_automation",
     "retries": 1,
@@ -35,4 +39,5 @@ with DAG(
     run_invoice_sync_task = PythonOperator(
         task_id="run_invoice_sync",
         python_callable=run_invoice_sync,
+        op_kwargs={"interface_id": INTERFACE_ID},
     )

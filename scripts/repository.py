@@ -1,4 +1,7 @@
 import json
+import logging
+import re
+import uuid
 from datetime import datetime, timezone
 
 from mysql.connector.cursor import MySQLCursor
@@ -10,6 +13,177 @@ from field_maps import (
     SUMMARY_FIELD_MAP,
     map_record,
 )
+
+logger = logging.getLogger(__name__)
+
+# interfaceconfiguration is a wide table (one row per interface) rather than a
+# key-value one, so loading it means mapping its columns onto the dotted
+# config.py keys that load_config(interface_values=...) already understands.
+# Columns left NULL in the DB are skipped so appsettings.yml keeps supplying
+# the default for anything not yet configured for a given interface.
+_STRING_COLUMN_KEY_MAP = {
+    "SFTP_Host": "Sftp.Host",
+    "SFTP_Port": "Sftp.Port",
+    "SFTP_UserName": "Sftp.Username",
+    "SFTP_Password": "Sftp.Password",
+    "SFTP_RemoteDirectory": "Sftp.RemoteDirectory",
+    "SMTP_Host": "Email.Smtp.Host",
+    "SMTP_Port": "Email.Smtp.Port",
+    "SMTP_UserId": "Email.Smtp.Username",
+    "SMTP_Password": "Email.Smtp.Password",
+    "Platform_InstanceUrl": "InvoiceApi.BaseUri",
+    "Platform_UserId": "InvoiceApi.Authentication.LoginUserName",
+    "Platform_Password": "InvoiceApi.Authentication.Password",
+    "Platform_AppAuthKey": "InvoiceApi.Authentication.ClientApiKey",
+    "Email_Sender_Email": "Email.Sender.Email",
+    "Email_Sender_Name": "Email.Sender.Name",
+    "Email_Subject": "Email.Subject",
+    "Email_Body": "Email.Body",
+    "Email_Attachment_FileName": "Email.Attachment.FileName",
+    "Failure_Subject": "Email.FailureNotification.Subject",
+    "Failure_Body": "Email.FailureNotification.Body",
+    "Output_Directory": "Output.Folder",
+    # Replaces the old hardcoded Jobs.CBTS_AP.OutputPrefix lookup: whichever
+    # interface is running gets its own name as the output filename prefix,
+    # with no per-interface config needed.
+    "InterfaceName": "Job.OutputPrefix",
+}
+_BOOLEAN_COLUMN_KEY_MAP = {
+    "SMTP_UseTLS": "Email.Smtp.UseTls",
+    "Email_Enabled": "Email.Enabled",
+    "Email_Attachment_Enabled": "Email.Attachment.Enabled",
+    "Failure_Notification_Enabled": "Email.FailureNotification.Enabled",
+}
+_LIST_COLUMN_KEY_MAP = {
+    "Email_Recipients_To": "Email.Recipients.To",
+    "Email_Recipients_Cc": "Email.Recipients.Cc",
+    "Failure_Recipients_To": "Email.FailureNotification.Recipients.To",
+    "Failure_Recipients_Cc": "Email.FailureNotification.Recipients.Cc",
+}
+
+
+def _parse_recipient_list(value: str) -> list:
+    value = value.strip()
+    if not value:
+        return []
+    if value.startswith("["):
+        try:
+            return json.loads(value)
+        except ValueError:
+            pass
+    return [item.strip() for item in re.split(r"[,;]", value) if item.strip()]
+
+
+def load_interface_configuration(cursor: MySQLCursor, interface_id: int) -> dict:
+    cursor.execute(
+        "SELECT * FROM interfaceconfiguration WHERE InterfaceId = %s AND IsActive = 1",
+        (interface_id,),
+    )
+    row = cursor.fetchone()
+    if row is None:
+        logger.error(
+            "No active interfaceconfiguration row for InterfaceId=%s (either it doesn't "
+            "exist, or IsActive=0)",
+            interface_id,
+        )
+        raise ValueError(f"No active interfaceconfiguration row for InterfaceId={interface_id}")
+    if not isinstance(row, dict):
+        columns = [d[0] for d in cursor.description]
+        row = dict(zip(columns, row))
+
+    values = {}
+    for column, dotted_key in _STRING_COLUMN_KEY_MAP.items():
+        value = row.get(column)
+        if value not in (None, ""):
+            values[dotted_key] = value
+    for column, dotted_key in _BOOLEAN_COLUMN_KEY_MAP.items():
+        value = row.get(column)
+        if value is not None:
+            values[dotted_key] = bool(value)
+    for column, dotted_key in _LIST_COLUMN_KEY_MAP.items():
+        value = row.get(column)
+        if value:
+            values[dotted_key] = _parse_recipient_list(value)
+    logger.debug(
+        "interfaceconfiguration InterfaceId=%s: resolved %d overlay key(s): %s",
+        interface_id,
+        len(values),
+        sorted(values.keys()),
+    )
+    return values
+
+
+def get_open_payment_files(cursor: MySQLCursor, interface_id: int) -> list:
+    cursor.execute(
+        """
+        SELECT id, ap_batch_name, ap_batch_payment_file_id, interface_id, ap_batch_status
+        FROM ap_payment_file_details
+        WHERE interface_id = %s AND ap_batch_status = 'New'
+        """,
+        (interface_id,),
+    )
+    rows = cursor.fetchall()
+    logger.debug(
+        "ap_payment_file_details: %d row(s) with ap_batch_status='New' for interface_id=%s",
+        len(rows),
+        interface_id,
+    )
+    return rows
+
+
+def get_invoice_numbers_for_payment_file(cursor: MySQLCursor, payment_file_detail_id: int) -> list:
+    cursor.execute(
+        """
+        SELECT DISTINCT ap_invoice_number
+        FROM ap_invoices
+        WHERE ap_paymentfile_id = %s AND ap_invoice_number IS NOT NULL
+        """,
+        (payment_file_detail_id,),
+    )
+    rows = cursor.fetchall()
+    invoice_numbers = [row["ap_invoice_number"] if isinstance(row, dict) else row[0] for row in rows]
+    logger.debug(
+        "ap_invoices: %d invoice number(s) found for ap_paymentfile_id=%s",
+        len(invoice_numbers),
+        payment_file_detail_id,
+    )
+    return invoice_numbers
+
+
+def create_process_log(cursor: MySQLCursor, payment_file_detail_id: int):
+    process_uuid = str(uuid.uuid4())
+    data = {
+        "proces_datetime": datetime.now(timezone.utc).replace(tzinfo=None),
+        "invoice_process_uuid": process_uuid,
+        "ap_payment_file_detail_id": payment_file_detail_id,
+    }
+    log_id = insert(cursor, "ap_invoices_process_log", data)
+    logger.debug(
+        "ap_invoices_process_log: inserted id=%s uuid=%s for ap_payment_file_detail_id=%s",
+        log_id,
+        process_uuid,
+        payment_file_detail_id,
+    )
+    return log_id, process_uuid
+
+
+def update_payment_file_status(
+    cursor: MySQLCursor, payment_file_detail_id: int, status: str, log_id: int
+) -> None:
+    cursor.execute(
+        """
+        UPDATE ap_payment_file_details
+        SET ap_batch_status = %s, processed_date = %s, log_id = %s
+        WHERE id = %s
+        """,
+        (status, datetime.now(timezone.utc).replace(tzinfo=None), log_id, payment_file_detail_id),
+    )
+    logger.debug(
+        "ap_payment_file_details id=%s: ap_batch_status set to '%s' (log_id=%s)",
+        payment_file_detail_id,
+        status,
+        log_id,
+    )
 
 
 def upsert(cursor: MySQLCursor, table: str, data: dict, unique_cols=None) -> int:
@@ -44,6 +218,7 @@ def insert_response_log(
     response_message: str,
     response_body,
     error_message: str = None,
+    invoice_process_uuid: str = None,
 ) -> int:
     data = {
         "invoice_number": invoice_number,
@@ -54,13 +229,22 @@ def insert_response_log(
         "response_body": json.dumps(response_body) if response_body is not None else None,
         "error_message": error_message,
         "created_datetime": datetime.now(timezone.utc).replace(tzinfo=None),
+        "invoice_process_uuid": invoice_process_uuid,
     }
     return insert(cursor, "invoice_response_log", data)
 
 
-def upsert_invoice_summary(cursor: MySQLCursor, record: dict, log_id: int) -> int:
+def upsert_invoice_summary(
+    cursor: MySQLCursor,
+    record: dict,
+    log_id: int,
+    invoice_process_uuid: str,
+    ap_payment_file_detail_id: int,
+) -> int:
     data = map_record(record, SUMMARY_FIELD_MAP)
     data["log_id"] = log_id
+    data["invoice_process_uuid"] = invoice_process_uuid
+    data["ap_payment_file_detail_id"] = ap_payment_file_detail_id
     return upsert(cursor, "invoice_summary", data, unique_cols=["invoice_id"])
 
 
@@ -115,8 +299,16 @@ def update_ap_invoice_status(
     )
 
 
-def store_invoice_record(cursor: MySQLCursor, record: dict, log_id: int) -> None:
-    invoice_id = upsert_invoice_summary(cursor, record, log_id)
+def store_invoice_record(
+    cursor: MySQLCursor,
+    record: dict,
+    log_id: int,
+    invoice_process_uuid: str,
+    ap_payment_file_detail_id: int,
+) -> None:
+    invoice_id = upsert_invoice_summary(
+        cursor, record, log_id, invoice_process_uuid, ap_payment_file_detail_id
+    )
     detail_id = upsert_invoice_detail(cursor, record, log_id)
 
     # clear previously stored nested rows for this invoice so re-processing doesn't duplicate them

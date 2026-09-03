@@ -1,7 +1,7 @@
+import argparse
 import logging
 import os
-
-import pandas as pd
+import re
 
 from auth_client import authenticate
 from config import load_config
@@ -10,46 +10,41 @@ from delivery import send_failure_email, send_success_email, upload_to_sftp
 from export_invoices_csv import export_invoices_csv
 from invoice_client import get_invoice
 from logging_config import setup_logging
-from repository import insert_response_log, store_invoice_record, update_ap_invoice_status
+from repository import (
+    create_process_log,
+    get_invoice_numbers_for_payment_file,
+    get_open_payment_files,
+    insert_response_log,
+    load_interface_configuration,
+    store_invoice_record,
+    update_ap_invoice_status,
+    update_payment_file_status,
+)
 
 logger = logging.getLogger(__name__)
 
-
-def get_invoice_numbers(cursor) -> pd.DataFrame:
-    logger.info("Step 2: fetching invoice numbers from ap_invoices")
-    cursor.execute(
-        "SELECT DISTINCT ap_invoice_number FROM airflow.ap_invoices "
-        "WHERE ap_invoice_number IS NOT NULL"
-    )
-    rows = cursor.fetchall()
-    df = pd.DataFrame(rows, columns=["ap_invoice_number"])
-
-    if df.empty:
-        logger.warning(
-            "Step 2: no invoice numbers found in ap_invoices "
-            "(ap_invoice_number IS NOT NULL) -- nothing will be processed this run"
-        )
-    else:
-        logger.info("Step 2: found %d distinct invoice number(s) to process", len(df))
-
-    return df
+_UNSAFE_FILENAME_CHARS = re.compile(r"[^A-Za-z0-9_.-]")
 
 
-def process_invoice(cursor, api_cfg, token: str, invoice_number: str) -> str:
-    logger.info("Step 3: invoice %s -- calling Get Invoice API", invoice_number)
+def process_invoice(
+    cursor,
+    api_cfg,
+    token: str,
+    invoice_number: str,
+    invoice_process_uuid: str,
+    ap_payment_file_detail_id: int,
+) -> str:
+    logger.info("Invoice %s -- calling Get Invoice API", invoice_number)
     response = get_invoice(api_cfg, token, invoice_number)
     logger.info(
-        "Step 3: invoice %s -- HTTP %s from %s",
-        invoice_number,
-        response.status_code,
-        response.url,
+        "Invoice %s -- HTTP %s from %s", invoice_number, response.status_code, response.url
     )
 
     try:
         payload = response.json()
     except ValueError:
         payload = None
-        logger.warning("Step 3: invoice %s -- response body was not valid JSON", invoice_number)
+        logger.warning("Invoice %s -- response body was not valid JSON", invoice_number)
 
     log_id = insert_response_log(
         cursor,
@@ -60,6 +55,7 @@ def process_invoice(cursor, api_cfg, token: str, invoice_number: str) -> str:
         response_message=(payload or {}).get("message"),
         response_body=payload,
         error_message=None if response.ok else response.text,
+        invoice_process_uuid=invoice_process_uuid,
     )
 
     records = (payload.get("data") or {}).get("records") or [] if payload else []
@@ -72,7 +68,7 @@ def process_invoice(cursor, api_cfg, token: str, invoice_number: str) -> str:
         api_status = "SUCCESS"
 
     logger.info(
-        "Step 4: invoice %s -- updating ap_invoices (status=%s, http=%s)",
+        "Invoice %s -- updating ap_invoices (status=%s, http=%s)",
         invoice_number,
         api_status,
         response.status_code,
@@ -86,79 +82,226 @@ def process_invoice(cursor, api_cfg, token: str, invoice_number: str) -> str:
     )
 
     if api_status != "SUCCESS":
-        logger.warning(
-            "Step 3: invoice %s -- status=%s, no detail rows stored",
-            invoice_number,
-            api_status,
-        )
+        logger.warning("Invoice %s -- status=%s, no detail rows stored", invoice_number, api_status)
         return api_status
 
     for record in records:
-        store_invoice_record(cursor, record, log_id)
+        store_invoice_record(
+            cursor, record, log_id, invoice_process_uuid, ap_payment_file_detail_id
+        )
     logger.info(
-        "Step 3: invoice %s -- status=SUCCESS, stored %d record(s) into detail tables",
+        "Invoice %s -- status=SUCCESS, stored %d record(s) into detail tables",
         invoice_number,
         len(records),
     )
     return api_status
 
 
-def main() -> None:
-    cfg = load_config()
-    log_file = setup_logging(cfg.logging)
-    logger.info("Logging this run to %s", log_file)
+def process_payment_file(conn, cursor, cfg, token: str, payment_file: dict) -> None:
+    payment_file_detail_id = payment_file["id"]
+    batch_name = payment_file.get("ap_batch_name") or str(payment_file_detail_id)
+    logger.info("=== Payment file %s (id=%s): starting ===", batch_name, payment_file_detail_id)
 
-    logger.info("Step 1: authenticating against %s", cfg.invoice_api.base_uri)
+    log_id = None
+    invoice_process_uuid = None
     try:
-        token = authenticate(cfg.invoice_api)
-    except Exception:
-        logger.exception("Step 1: authentication failed")
-        raise
-    logger.info("Step 1: authentication successful")
+        logger.info(
+            "Payment file %s: Step 5 -- creating process log record", batch_name
+        )
+        log_id, invoice_process_uuid = create_process_log(cursor, payment_file_detail_id)
+        conn.commit()
+        logger.info(
+            "Payment file %s: process log id=%s, invoice_process_uuid=%s",
+            batch_name,
+            log_id,
+            invoice_process_uuid,
+        )
 
-    conn = get_connection(cfg.mysql)
-    cursor = conn.cursor(dictionary=True)
-    status_counts = {"SUCCESS": 0, "PENDING": 0, "FAILED": 0}
-    try:
-        invoice_numbers_df = get_invoice_numbers(cursor)
-        cursor = conn.cursor()  # plain cursor for the write path below
+        logger.info(
+            "Payment file %s: Step 4 -- pulling invoice numbers for payment_file_id=%s",
+            batch_name,
+            payment_file_detail_id,
+        )
+        invoice_numbers = get_invoice_numbers_for_payment_file(cursor, payment_file_detail_id)
+        if not invoice_numbers:
+            logger.warning("Payment file %s: no invoices found -- nothing to process", batch_name)
+        else:
+            logger.info(
+                "Payment file %s: found %d invoice(s) to process", batch_name, len(invoice_numbers)
+            )
 
-        for invoice_number in invoice_numbers_df["ap_invoice_number"]:
-            status = process_invoice(cursor, cfg.invoice_api, token, invoice_number)
+        logger.info("Payment file %s: Step 6 -- processing invoices", batch_name)
+        status_counts = {"SUCCESS": 0, "PENDING": 0, "FAILED": 0}
+        for invoice_number in invoice_numbers:
+            status = process_invoice(
+                cursor, cfg.invoice_api, token, invoice_number, invoice_process_uuid, payment_file_detail_id
+            )
             status_counts[status] = status_counts.get(status, 0) + 1
             conn.commit()
 
         logger.info(
-            "Steps 2-4 complete: %d SUCCESS, %d PENDING, %d FAILED",
+            "Payment file %s: Step 6 complete -- %d SUCCESS, %d PENDING, %d FAILED",
+            batch_name,
             status_counts["SUCCESS"],
             status_counts["PENDING"],
             status_counts["FAILED"],
         )
-    except Exception:
-        logger.exception("Pipeline run failed -- rolling back")
-        conn.rollback()
-        raise
-    finally:
-        cursor.close()
-        conn.close()
+        batch_status = "Failure" if status_counts["FAILED"] else "Success"
+        if batch_status == "Failure":
+            logger.warning(
+                "Payment file %s: %d invoice(s) FAILED -- batch will be marked Failure and the "
+                "failure notification will be sent instead of the success email",
+                batch_name,
+                status_counts["FAILED"],
+            )
 
-    logger.info("Step 5: generating output CSV")
-    output_filename = cfg.output.file_name
-    try:
-        output_path = export_invoices_csv(cfg)
+        filename_suffix = _UNSAFE_FILENAME_CHARS.sub("_", batch_name)
+        output_filename = cfg.output.file_name
+        logger.info("Payment file %s: generating CSV export", batch_name)
+        output_path = export_invoices_csv(
+            cfg, invoice_process_uuid=invoice_process_uuid, filename_suffix=filename_suffix
+        )
         output_filename = os.path.basename(output_path)
-        logger.info("Step 5: CSV export written to %s", output_path)
-        logger.info("Step 6: uploading %s to SFTP", output_filename)
+        logger.info("Payment file %s: CSV export written to %s", batch_name, output_path)
+
+        logger.info(
+            "Payment file %s: uploading %s to SFTP (%s)",
+            batch_name,
+            output_filename,
+            cfg.sftp.host,
+        )
         upload_to_sftp(cfg.sftp, output_path, output_filename)
-        logger.info("Step 7: sending success email for %s", output_filename)
-        send_success_email(cfg.email, output_filename, output_path)
+        logger.info("Payment file %s: SFTP upload complete", batch_name)
+
+        if batch_status == "Success":
+            logger.info("Payment file %s: sending success email", batch_name)
+            send_success_email(cfg.email, output_filename, output_path)
+            logger.info("Payment file %s: success email sent (or skipped -- Email.Enabled=false)", batch_name)
+        else:
+            logger.info("Payment file %s: sending failure notification email", batch_name)
+            send_failure_email(
+                cfg.email,
+                output_filename,
+                RuntimeError(
+                    f"{status_counts['FAILED']} of {len(invoice_numbers)} invoice(s) failed "
+                    f"while processing payment file {batch_name}"
+                ),
+            )
+            logger.info(
+                "Payment file %s: failure email sent (or skipped -- FailureNotification.Enabled=false)",
+                batch_name,
+            )
     except Exception as error:
-        logger.exception("Step 5/6/7: export, SFTP delivery, or email failed")
+        logger.exception(
+            "Payment file %s (id=%s): processing failed -- %s: %s",
+            batch_name,
+            payment_file_detail_id,
+            type(error).__name__,
+            error,
+        )
         try:
-            send_failure_email(cfg.email, output_filename, error)
+            conn.rollback()
         except Exception:
-            logger.exception("Failure notification could not be sent")
+            logger.exception("Payment file %s: rollback failed", batch_name)
+        try:
+            update_payment_file_status(cursor, payment_file_detail_id, "Failure", log_id)
+            conn.commit()
+            logger.info("Payment file %s: marked Failure", batch_name)
+        except Exception:
+            logger.exception(
+                "Payment file %s: could not update ap_payment_file_details to Failure", batch_name
+            )
+            try:
+                conn.rollback()
+            except Exception:
+                logger.exception("Payment file %s: rollback failed", batch_name)
+        try:
+            logger.info("Payment file %s: sending failure notification email", batch_name)
+            send_failure_email(cfg.email, cfg.output.file_name, error)
+        except Exception:
+            logger.exception("Payment file %s: failure notification could not be sent", batch_name)
+        return
+
+    update_payment_file_status(cursor, payment_file_detail_id, batch_status, log_id)
+    conn.commit()
+    logger.info("=== Payment file %s: done, marked %s ===", batch_name, batch_status)
+
+
+def main(interface_id: int | None = None) -> None:
+    """Entry point. `interface_id` is required; pass it directly when calling this
+    from other Python code (e.g. an Airflow PythonOperator) -- CLI usage instead
+    reads it from --interface-id via argparse."""
+    if interface_id is None:
+        parser = argparse.ArgumentParser(description="Process AP invoices for a given interface.")
+        parser.add_argument(
+            "--interface-id",
+            type=int,
+            required=True,
+            dest="interface_id",
+            help="interfaceconfiguration.InterfaceId to process",
+        )
+        interface_id = parser.parse_args().interface_id
+
+    try:
+        cfg = load_config()
+        log_file = setup_logging(cfg.logging)
+    except Exception:
+        # logging isn't configured yet at this point (it depends on the config we just
+        # failed to load), so this is the one failure in the whole run that can't reach
+        # the log file -- print it so it's at least visible on the console/stderr.
+        import traceback
+
+        traceback.print_exc()
         raise
+    logger.info("=== process_invoices run starting for InterfaceId=%s ===", interface_id)
+    logger.info("Logging this run to %s", log_file)
+
+    logger.info("Connecting to MySQL at %s/%s", cfg.mysql.host, cfg.mysql.database)
+    try:
+        conn = get_connection(cfg.mysql)
+    except Exception:
+        logger.exception("Could not connect to MySQL at %s/%s", cfg.mysql.host, cfg.mysql.database)
+        raise
+    cursor = conn.cursor(dictionary=True)
+    try:
+        try:
+            logger.info(
+                "Step 1-2: loading interface configuration for InterfaceId=%s", interface_id
+            )
+            interface_values = load_interface_configuration(cursor, interface_id)
+            cfg = load_config(interface_values=interface_values)
+            logger.info("Step 1-2: interface configuration loaded")
+
+            logger.info("Authenticating against %s", cfg.invoice_api.base_uri)
+            token = authenticate(cfg.invoice_api)
+            logger.info("Authentication successful")
+
+            logger.info("Step 3: querying open ('New') payment files for InterfaceId=%s", interface_id)
+            payment_files = get_open_payment_files(cursor, interface_id)
+            logger.info(
+                "Step 3: found %d open ('New') payment file(s) for InterfaceId=%s",
+                len(payment_files),
+                interface_id,
+            )
+        except Exception:
+            logger.exception(
+                "Run setup failed for InterfaceId=%s before any payment file could be processed",
+                interface_id,
+            )
+            raise
+
+        for payment_file in payment_files:
+            process_payment_file(conn, cursor, cfg, token, payment_file)
+    finally:
+        try:
+            cursor.close()
+        except Exception:
+            logger.exception("Error closing DB cursor")
+        try:
+            conn.close()
+        except Exception:
+            logger.exception("Error closing DB connection")
+        logger.info("=== process_invoices run finished for InterfaceId=%s ===", interface_id)
 
 
 if __name__ == "__main__":

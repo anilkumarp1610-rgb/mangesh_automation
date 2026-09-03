@@ -10,6 +10,57 @@
 
 USE airflow;
 
+-- Interface settings, keyed by InterfaceId, one wide row per interface (e.g. CBTS_AP).
+-- Secret columns (SFTP_Password, SMTP_Password, Platform_Password, Platform_AppAuthKey,
+-- Platform_DB_Password) are plaintext today -- encrypting them at rest is a planned
+-- follow-up, not yet implemented.
+CREATE TABLE IF NOT EXISTS interfaceconfiguration (
+    InterfaceId                  INT AUTO_INCREMENT PRIMARY KEY,
+    InterfaceName                VARCHAR(200) NOT NULL,
+    SFTP_Host                    VARCHAR(255),
+    SFTP_Port                    INT,
+    SFTP_UserName                VARCHAR(255),
+    SFTP_Password                VARCHAR(500),
+    SFTP_RemoteDirectory         VARCHAR(500),
+    SMTP_Host                    VARCHAR(255),
+    SMTP_Port                    INT,
+    SMTP_UserId                  VARCHAR(255),
+    SMTP_Password                VARCHAR(500),
+    SMTP_UseTLS                  TINYINT(1),
+    Platform_InstanceUrl         VARCHAR(500),
+    Platform_UserId               VARCHAR(255),
+    Platform_Password            VARCHAR(500),
+    Platform_AppAuthKey          VARCHAR(500),
+    Platform_DB_Server           VARCHAR(50),
+    Platform_DB_User             VARCHAR(50),
+    Platform_DB_Password         VARCHAR(50),
+    Platform_DB_Name             VARCHAR(50),
+    Platform_DB_AP_Query         LONGTEXT,
+    IsActive                     TINYINT(1) NOT NULL DEFAULT 1,
+    CreatedDate                  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    ModifiedDate                 DATETIME,
+    Output_Directory             VARCHAR(500),
+    Archive_Directory            VARCHAR(500),
+    Email_Enabled                TINYINT(1) NOT NULL DEFAULT 1,
+    Email_Sender_Email           VARCHAR(255),
+    Email_Sender_Name            VARCHAR(255),
+    Email_Recipients_To          LONGTEXT,
+    Email_Recipients_Cc          LONGTEXT,
+    Email_Subject                VARCHAR(500),
+    Email_Body                   LONGTEXT,
+    Email_Attachment_Enabled     TINYINT(1) NOT NULL DEFAULT 1,
+    Email_Attachment_FilePath    VARCHAR(500),
+    Email_Attachment_FileName    VARCHAR(500),
+    Failure_Notification_Enabled TINYINT(1) NOT NULL DEFAULT 1,
+    Failure_Subject              VARCHAR(500),
+    Failure_Body                 LONGTEXT,
+    Failure_Recipients_To        LONGTEXT,
+    Failure_Recipients_Cc        LONGTEXT,
+    output_combined              TINYINT(1),
+    output_type                  VARCHAR(50),
+    UNIQUE KEY UQ_InterfaceConfiguration_InterfaceName (InterfaceName)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
 -- 0. AP Invoices Table (source list of invoices to process + last API call outcome)
 CREATE TABLE IF NOT EXISTS ap_invoices (
     ap_invoice_id               BIGINT AUTO_INCREMENT PRIMARY KEY,
@@ -23,6 +74,34 @@ CREATE TABLE IF NOT EXISTS ap_invoices (
     KEY ix_ap_invoices_paymentfile_id (ap_paymentfile_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
+-- 0a. AP Payment File Details (one row per payment-file batch; ap_batch_status
+-- drives the foreach loop in process_invoices.py -- 'New' rows for a given
+-- interface are processed, then flipped to 'Success'/'Failure').
+-- ap_invoices.ap_paymentfile_id is a foreign key to this table's `id`.
+CREATE TABLE IF NOT EXISTS ap_payment_file_details (
+    id                          INT NOT NULL PRIMARY KEY,
+    ap_batch_name               VARCHAR(45),
+    ap_batch_payment_file_id    INT,
+    interface_id                INT,
+    ap_batch_status             VARCHAR(45),
+    processed_date               DATETIME,
+    log_id                       INT,
+    KEY ix_payment_file_interface_status (interface_id, ap_batch_status)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- 0b. AP Invoices Process Log (one row per payment-file processing run; its
+-- invoice_process_uuid is threaded into invoice_response_log and
+-- invoice_summary so output generation can be scoped to a single run instead
+-- of the whole table history).
+CREATE TABLE IF NOT EXISTS ap_invoices_process_log (
+    id                          INT AUTO_INCREMENT PRIMARY KEY,
+    proces_datetime             DATETIME,
+    invoice_process_uuid        VARCHAR(45),
+    ap_payment_file_detail_id   INT,
+    CONSTRAINT fk_process_log_payment_file FOREIGN KEY (ap_payment_file_detail_id)
+        REFERENCES ap_payment_file_details (id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
 -- 1. Invoice response Log Table (raw API response + datetime, one row per API call)
 CREATE TABLE IF NOT EXISTS invoice_response_log (
     log_id              BIGINT AUTO_INCREMENT PRIMARY KEY,
@@ -34,6 +113,7 @@ CREATE TABLE IF NOT EXISTS invoice_response_log (
     response_body       JSON,
     error_message       TEXT,
     created_datetime    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    invoice_process_uuid VARCHAR(45),
     KEY ix_response_log_invoice_number (invoice_number),
     KEY ix_response_log_created_datetime (created_datetime)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
@@ -56,8 +136,12 @@ CREATE TABLE IF NOT EXISTS invoice_summary (
     account_service_type    VARCHAR(50),
     log_id                  BIGINT,
     fetched_datetime        DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    invoice_process_uuid    VARCHAR(45),
+    ap_payment_file_detail_id INT,
     UNIQUE KEY uq_invoice_summary_invoice_id (invoice_id),
-    CONSTRAINT fk_summary_log FOREIGN KEY (log_id) REFERENCES invoice_response_log (log_id)
+    CONSTRAINT fk_summary_log FOREIGN KEY (log_id) REFERENCES invoice_response_log (log_id),
+    CONSTRAINT fk_summary_payment_file FOREIGN KEY (ap_payment_file_detail_id)
+        REFERENCES ap_payment_file_details (id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 -- 3. Invoice Detail Table (full "records" shape when expand=true)
@@ -216,3 +300,21 @@ VALUES
 (8, 'INV-10008', 1008, '2026-08-26 05:07:00', 'FAILED',  '{"invoice_id":8}', 400),
 (9, 'INV-10009', 1009, '2026-08-26 05:08:00', 'SUCCESS', '{"invoice_id":9}', 200),
 (10, 'INV-10010', 1010, '2026-08-26 05:09:00', 'PENDING', '{"invoice_id":10}', 202);
+
+-- Base/seed records for ap_payment_file_details -- one open ('New') batch per
+-- ap_paymentfile_id used above, and interface_id=1 to match the CBTS_AP row
+-- seeded into interfaceconfiguration elsewhere. INSERT IGNORE keeps this
+-- re-runnable.
+INSERT IGNORE INTO airflow.ap_payment_file_details
+(id, ap_batch_name, ap_batch_payment_file_id, interface_id, ap_batch_status, processed_date, log_id)
+VALUES
+(1001, 'CBTS_AP_BATCH_1001', 1001, 1, 'New', NULL, NULL),
+(1002, 'CBTS_AP_BATCH_1002', 1002, 1, 'New', NULL, NULL),
+(1003, 'CBTS_AP_BATCH_1003', 1003, 1, 'New', NULL, NULL),
+(1004, 'CBTS_AP_BATCH_1004', 1004, 1, 'New', NULL, NULL),
+(1005, 'CBTS_AP_BATCH_1005', 1005, 1, 'New', NULL, NULL),
+(1006, 'CBTS_AP_BATCH_1006', 1006, 1, 'New', NULL, NULL),
+(1007, 'CBTS_AP_BATCH_1007', 1007, 1, 'New', NULL, NULL),
+(1008, 'CBTS_AP_BATCH_1008', 1008, 1, 'New', NULL, NULL),
+(1009, 'CBTS_AP_BATCH_1009', 1009, 1, 'New', NULL, NULL),
+(1010, 'CBTS_AP_BATCH_1010', 1010, 1, 'New', NULL, NULL);

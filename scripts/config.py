@@ -132,9 +132,20 @@ def _expand_env(value):
     return value
 
 
-def load_config(path: str = APPSETTINGS_PATH) -> AppConfig:
+def _set_nested(raw: dict, key: str, value) -> None:
+    parts = key.split(".")
+    target = raw
+    for part in parts[:-1]:
+        target = target.setdefault(part, {})
+    target[parts[-1]] = value
+
+
+def load_config(path: str = APPSETTINGS_PATH, interface_values: dict | None = None) -> AppConfig:
     with open(path, "r", encoding="utf-8") as f:
         raw = yaml.safe_load(f)
+
+    for key, value in (interface_values or {}).items():
+        _set_nested(raw, key, value)
 
     def section(name):
         return _expand_env(raw.get(name, {}))
@@ -145,7 +156,10 @@ def load_config(path: str = APPSETTINGS_PATH) -> AppConfig:
     auth_raw = api_raw["Authentication"]
     get_invoice_raw = api_raw["GetInvoice"]
     output_raw = raw["Output"]
-    job_raw = raw.get("Jobs", {}).get("CBTS_AP", {})
+    # Not hardcoded to one interface: repository.py::load_interface_configuration
+    # overlays interfaceconfiguration.InterfaceName onto Job.OutputPrefix, so this
+    # resolves per whichever --interface-id is actually running.
+    job_raw = raw.get("Job", {})
     sftp_raw = section("Sftp")
     email_raw = section("Email")
     smtp_raw = email_raw.get("Smtp", {})
@@ -169,9 +183,9 @@ def load_config(path: str = APPSETTINGS_PATH) -> AppConfig:
             base_uri=api_raw["BaseUri"],
             authentication=AuthenticationConfig(
                 endpoint=auth_raw["Endpoint"],
-                client_api_key=auth_raw["ClientApiKey"],
-                login_user_name=auth_raw["LoginUserName"],
-                password=auth_raw["Password"],
+                client_api_key=auth_raw.get("ClientApiKey", ""),
+                login_user_name=auth_raw.get("LoginUserName", ""),
+                password=auth_raw.get("Password", ""),
             ),
             get_invoice=GetInvoiceConfig(
                 endpoint=get_invoice_raw["Endpoint"],
@@ -194,20 +208,22 @@ def load_config(path: str = APPSETTINGS_PATH) -> AppConfig:
         ),
         job=JobConfig(output_prefix=job_raw.get("OutputPrefix", "")),
         sftp=SftpConfig(
-            host=sftp_raw["Host"],
+            host=sftp_raw.get("Host", ""),
             port=sftp_raw.get("Port", 22),
-            username=sftp_raw["Username"],
-            password=sftp_raw["Password"],
-            remote_directory=sftp_raw["RemoteDirectory"],
+            username=sftp_raw.get("Username", ""),
+            password=sftp_raw.get("Password", ""),
+            remote_directory=sftp_raw.get("RemoteDirectory", ""),
         ),
         email=EmailConfig(
             enabled=email_raw.get("Enabled", False),
-            smtp_host=smtp_raw["Host"],
+            smtp_host=smtp_raw.get("Host", ""),
             smtp_port=smtp_raw.get("Port", 25),
-            smtp_username=smtp_raw["Username"],
-            smtp_password=smtp_raw["Password"],
+            smtp_username=smtp_raw.get("Username", ""),
+            smtp_password=smtp_raw.get("Password", ""),
             use_tls=smtp_raw.get("UseTls", False),
-            sender=SenderConfig(**{ "email": sender_raw["Email"], "name": sender_raw["Name"] }),
+            sender=SenderConfig(
+                email=sender_raw.get("Email", ""), name=sender_raw.get("Name", "")
+            ),
             recipients_to=recipients_raw.get("To", []),
             recipients_cc=recipients_raw.get("Cc", []),
             subject=email_raw.get("Subject", ""),

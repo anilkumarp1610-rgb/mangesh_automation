@@ -9,6 +9,14 @@ logger = logging.getLogger(__name__)
 
 def authenticate(cfg: InvoiceApiConfig) -> str:
     auth_cfg = cfg.authentication
+    if not auth_cfg.client_api_key or not auth_cfg.login_user_name or not auth_cfg.password:
+        logger.error(
+            "InvoiceApi.Authentication is missing credentials (client_api_key/login_user_name/"
+            "password) -- check interfaceconfiguration.Platform_UserId/Platform_Password/"
+            "Platform_AppAuthKey for this interface, or InvoiceApi.Authentication in appsettings.yml"
+        )
+        raise RuntimeError("Invoice API authentication credentials are not configured")
+
     url = f"{cfg.base_uri.rstrip('/')}{auth_cfg.endpoint}"
     headers = {
         "ClientApiKey": auth_cfg.client_api_key,
