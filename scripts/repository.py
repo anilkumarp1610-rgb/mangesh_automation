@@ -282,7 +282,7 @@ def update_ap_invoice_status(
     response_status_code: int,
 ) -> None:
     sql = """
-        UPDATE airflow.ap_invoices
+        UPDATE ap_invoices
         SET ap_invoice_api_status = %s,
             api_response_obj = %s,
             api_response_status_code = %s
