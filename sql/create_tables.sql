@@ -12,8 +12,9 @@ USE airflow;
 
 -- Interface settings, keyed by InterfaceId, one wide row per interface (e.g. CBTS_AP).
 -- Secret columns (SFTP_Password, SMTP_Password, Platform_Password, Platform_AppAuthKey,
--- Platform_DB_Password) are plaintext today -- encrypting them at rest is a planned
--- follow-up, not yet implemented.
+-- Platform_DB_Password): the tracker (tracker/) writes these AES-256-GCM encrypted as
+-- enc:v1:<base64…>. Rows written by other tools may still be plaintext; readers must
+-- handle both (scripts/repository.py decrypts enc:v1: values, passes plaintext through).
 CREATE TABLE IF NOT EXISTS interfaceconfiguration (
     InterfaceId                  INT AUTO_INCREMENT PRIMARY KEY,
     InterfaceName                VARCHAR(200) NOT NULL,
@@ -33,7 +34,7 @@ CREATE TABLE IF NOT EXISTS interfaceconfiguration (
     Platform_AppAuthKey          VARCHAR(500),
     Platform_DB_Server           VARCHAR(50),
     Platform_DB_User             VARCHAR(50),
-    Platform_DB_Password         VARCHAR(50),
+    Platform_DB_Password         VARCHAR(500),  -- wide enough for the tracker's enc:v1: ciphertext
     Platform_DB_Name             VARCHAR(50),
     Platform_DB_AP_Query         LONGTEXT,
     IsActive                     TINYINT(1) NOT NULL DEFAULT 1,
@@ -78,8 +79,10 @@ CREATE TABLE IF NOT EXISTS ap_invoices (
 -- drives the foreach loop in process_invoices.py -- 'New' rows for a given
 -- interface are processed, then flipped to 'Success'/'Failure').
 -- ap_invoices.ap_paymentfile_id is a foreign key to this table's `id`.
+-- `id` is AUTO_INCREMENT: upstream loaders may still supply it explicitly, but the
+-- tracker UI (tracker/) inserts batches and needs MySQL to assign it.
 CREATE TABLE IF NOT EXISTS ap_payment_file_details (
-    id                          INT NOT NULL PRIMARY KEY,
+    id                          INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
     ap_batch_name               VARCHAR(45),
     ap_batch_payment_file_id    INT,
     interface_id                INT,

@@ -13,8 +13,20 @@ from field_maps import (
     SUMMARY_FIELD_MAP,
     map_record,
 )
+from secret_crypto import decrypt_secret
 
 logger = logging.getLogger(__name__)
+
+# interfaceconfiguration columns the tracker web app stores AES-256-GCM encrypted
+# (enc:v1:...). decrypt_secret() passes plaintext values through untouched, so a
+# database with a mix of tracker-written and legacy rows still loads.
+_SECRET_COLUMNS = (
+    "SFTP_Password",
+    "SMTP_Password",
+    "Platform_Password",
+    "Platform_AppAuthKey",
+    "Platform_DB_Password",
+)
 
 # interfaceconfiguration is a wide table (one row per interface) rather than a
 # key-value one, so loading it means mapping its columns onto the dotted
@@ -90,6 +102,19 @@ def load_interface_configuration(cursor: MySQLCursor, interface_id: int) -> dict
     if not isinstance(row, dict):
         columns = [d[0] for d in cursor.description]
         row = dict(zip(columns, row))
+
+    for column in _SECRET_COLUMNS:
+        if row.get(column):
+            try:
+                row[column] = decrypt_secret(row[column])
+            except Exception:
+                logger.exception(
+                    "Could not decrypt interfaceconfiguration.%s for InterfaceId=%s -- "
+                    "check INTERFACE_SECRET_KEY matches the tracker backend",
+                    column,
+                    interface_id,
+                )
+                raise
 
     values = {}
     for column, dotted_key in _STRING_COLUMN_KEY_MAP.items():
