@@ -34,9 +34,9 @@ export function ResponseLogDetailPage() {
         description="Raw API call record (invoice_response_log)."
         actions={
           <Button variant="outline" size="sm" asChild>
-            <Link to="/run-logs">
+            <Link to="/ap-batches">
               <ArrowLeft className="mr-2 h-4 w-4" />
-              Run Logs
+              AP Batches
             </Link>
           </Button>
         }
@@ -62,7 +62,7 @@ export function ResponseLogDetailPage() {
                   { label: 'Message', value: log.response_message ?? '—' },
                   { label: 'When', value: formatDateTime(log.created_datetime) },
                   {
-                    label: 'Run UUID',
+                    label: 'Process UUID',
                     value: <span className="font-mono text-xs">{log.invoice_process_uuid ?? '—'}</span>,
                   },
                   {

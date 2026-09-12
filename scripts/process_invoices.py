@@ -11,11 +11,11 @@ from export_invoices_csv import export_invoices_csv
 from invoice_client import get_invoice
 from logging_config import setup_logging
 from repository import (
-    create_process_log,
     get_invoice_numbers_for_payment_file,
     get_open_payment_files,
     insert_response_log,
     load_interface_configuration,
+    start_batch_run,
     store_invoice_record,
     update_ap_invoice_status,
     update_payment_file_status,
@@ -103,18 +103,16 @@ def process_payment_file(conn, cursor, cfg, token: str, payment_file: dict) -> N
     batch_name = payment_file.get("ap_batch_name") or str(payment_file_detail_id)
     logger.info("=== Payment file %s (id=%s): starting ===", batch_name, payment_file_detail_id)
 
-    log_id = None
     invoice_process_uuid = None
     try:
         logger.info(
-            "Payment file %s: Step 5 -- creating process log record", batch_name
+            "Payment file %s: Step 5 -- starting run (fresh invoice_process_uuid)", batch_name
         )
-        log_id, invoice_process_uuid = create_process_log(cursor, payment_file_detail_id)
+        invoice_process_uuid = start_batch_run(cursor, payment_file_detail_id)
         conn.commit()
         logger.info(
-            "Payment file %s: process log id=%s, invoice_process_uuid=%s",
+            "Payment file %s: invoice_process_uuid=%s",
             batch_name,
-            log_id,
             invoice_process_uuid,
         )
 
@@ -205,7 +203,7 @@ def process_payment_file(conn, cursor, cfg, token: str, payment_file: dict) -> N
         except Exception:
             logger.exception("Payment file %s: rollback failed", batch_name)
         try:
-            update_payment_file_status(cursor, payment_file_detail_id, "Failure", log_id)
+            update_payment_file_status(cursor, payment_file_detail_id, "Failure")
             conn.commit()
             logger.info("Payment file %s: marked Failure", batch_name)
         except Exception:
@@ -223,7 +221,7 @@ def process_payment_file(conn, cursor, cfg, token: str, payment_file: dict) -> N
             logger.exception("Payment file %s: failure notification could not be sent", batch_name)
         return
 
-    update_payment_file_status(cursor, payment_file_detail_id, batch_status, log_id)
+    update_payment_file_status(cursor, payment_file_detail_id, batch_status)
     conn.commit()
     logger.info("=== Payment file %s: done, marked %s ===", batch_name, batch_status)
 

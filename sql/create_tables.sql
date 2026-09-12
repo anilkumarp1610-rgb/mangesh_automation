@@ -81,6 +81,17 @@ CREATE TABLE IF NOT EXISTS ap_invoices (
 -- ap_invoices.ap_paymentfile_id is a foreign key to this table's `id`.
 -- `id` is AUTO_INCREMENT: upstream loaders may still supply it explicitly, but the
 -- tracker UI (tracker/) inserts batches and needs MySQL to assign it.
+--
+-- client..fetched_datetime hold the raw Get Payment Batches API record for
+-- this batch (formerly a separate 1:1 ap_batch_details table -- merged in
+-- since it was always a 1:1 shadow, never queried independently; see
+-- sql/migrate_merge_ap_batch_details.sql). ap_batch_status/processed_date/
+-- invoice_process_uuid remain pipeline-owned (New/Success/Failure), distinct
+-- from the upstream ap_payment_file_status column. invoice_process_uuid holds
+-- the current run's UUID (formerly a separate ap_invoices_process_log table,
+-- one row per run, referenced via a log_id FK -- merged in since a batch is
+-- only ever processed by one run at a time; see
+-- sql/migrate_merge_ap_invoices_process_log.sql).
 CREATE TABLE IF NOT EXISTS ap_payment_file_details (
     id                          INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
     ap_batch_name               VARCHAR(45),
@@ -88,35 +99,22 @@ CREATE TABLE IF NOT EXISTS ap_payment_file_details (
     interface_id                INT,
     ap_batch_status             VARCHAR(45),
     processed_date               DATETIME,
-    log_id                       INT,
+    invoice_process_uuid         VARCHAR(45),
+    client                       VARCHAR(200),
+    ap_created_date               DATETIME,
+    ap_payment_file_status        VARCHAR(50),
+    no_of_invoices                INT,
+    no_of_vendors                 INT,
+    earliest_due_date             DATETIME,
+    currency                      VARCHAR(10),
+    invoice_amount                 DECIMAL(18,2),
+    allocated_amount               DECIMAL(18,2),
+    detail_invoice_amount          DECIMAL(18,2),
+    fetched_datetime               DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     KEY ix_payment_file_interface_status (interface_id, ap_batch_status)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
--- 0a-i. AP Batch Details (raw response of the Get Payment Batches API --
--- GET /invoices/invoiceAPBatches -- one row per ap_payment_file_details row
--- inserted by scripts/sync_payment_files.py, keyed to it 1:1).
-CREATE TABLE IF NOT EXISTS ap_batch_details (
-    id                          BIGINT AUTO_INCREMENT PRIMARY KEY,
-    ap_payment_file_detail_id   INT NOT NULL,
-    client                      VARCHAR(200),
-    payment_file_id             INT,
-    ap_created_date             DATETIME,
-    ap_batch_name                VARCHAR(100),
-    ap_payment_file_status       VARCHAR(50),
-    no_of_invoices               INT,
-    no_of_vendors                INT,
-    earliest_due_date            DATETIME,
-    currency                     VARCHAR(10),
-    invoice_amount                DECIMAL(18,2),
-    allocated_amount              DECIMAL(18,2),
-    detail_invoice_amount         DECIMAL(18,2),
-    fetched_datetime              DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    KEY ix_batch_details_payment_file_id (payment_file_id),
-    CONSTRAINT fk_batch_details_payment_file FOREIGN KEY (ap_payment_file_detail_id)
-        REFERENCES ap_payment_file_details (id)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-
--- 0a-ii. AP Batch Invoice Details (raw response of the Get Invoice List API --
+-- 0a-i. AP Batch Invoice Details (raw response of the Get Invoice List API --
 -- GET /invoices/invoiceAPBatchesDetails?paymentFileId=... -- one row per
 -- invoiceAPBatchDetails[] entry, keyed to the ap_payment_file_details row that
 -- triggered the pull. Its nested allocationValues[]/custom[] arrays are
@@ -173,7 +171,7 @@ CREATE TABLE IF NOT EXISTS ap_batch_invoice_details (
         REFERENCES ap_payment_file_details (id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
--- 0a-iii. AP Batch Invoice Allocation Values (invoiceAPBatchDetails[].allocationValues[]
+-- 0a-ii. AP Batch Invoice Allocation Values (invoiceAPBatchDetails[].allocationValues[]
 -- -- child rows of ap_batch_invoice_details, one row per array entry).
 CREATE TABLE IF NOT EXISTS ap_batch_invoice_allocation_values (
     id                          BIGINT AUTO_INCREMENT PRIMARY KEY,
@@ -195,7 +193,7 @@ CREATE TABLE IF NOT EXISTS ap_batch_invoice_allocation_values (
         REFERENCES ap_batch_invoice_details (id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
--- 0a-iv. AP Batch Invoice Custom (invoiceAPBatchDetails[].custom[] -- child
+-- 0a-iii. AP Batch Invoice Custom (invoiceAPBatchDetails[].custom[] -- child
 -- rows of ap_batch_invoice_details, one row per array entry).
 CREATE TABLE IF NOT EXISTS ap_batch_invoice_custom (
     id                          BIGINT AUTO_INCREMENT PRIMARY KEY,
@@ -212,19 +210,6 @@ CREATE TABLE IF NOT EXISTS ap_batch_invoice_custom (
     account_custom10            VARCHAR(200),
     CONSTRAINT fk_batch_invoice_custom_detail FOREIGN KEY (batch_invoice_detail_id)
         REFERENCES ap_batch_invoice_details (id)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-
--- 0b. AP Invoices Process Log (one row per payment-file processing run; its
--- invoice_process_uuid is threaded into invoice_response_log and
--- invoice_summary so output generation can be scoped to a single run instead
--- of the whole table history).
-CREATE TABLE IF NOT EXISTS ap_invoices_process_log (
-    id                          INT AUTO_INCREMENT PRIMARY KEY,
-    proces_datetime             DATETIME,
-    invoice_process_uuid        VARCHAR(45),
-    ap_payment_file_detail_id   INT,
-    CONSTRAINT fk_process_log_payment_file FOREIGN KEY (ap_payment_file_detail_id)
-        REFERENCES ap_payment_file_details (id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 -- 1. Invoice response Log Table (raw API response + datetime, one row per API call)

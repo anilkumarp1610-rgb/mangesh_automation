@@ -18,7 +18,7 @@ const listConfig: ListConfig = {
       values: ['New', 'Success', 'Failure'],
     },
     processedDate: { column: 'b.processed_date', type: 'date' },
-    logId: { column: 'b.log_id', type: 'number' },
+    invoiceProcessUuid: { column: 'b.invoice_process_uuid', type: 'string' },
   },
 };
 
@@ -31,11 +31,10 @@ export function listBatches(req: Request) {
     selectSql: `
       SELECT b.id, b.ap_batch_name, b.ap_batch_payment_file_id, b.interface_id,
              i.InterfaceName AS interface_name,
-             b.ap_batch_status, b.processed_date, b.log_id,
+             b.ap_batch_status, b.processed_date, b.invoice_process_uuid,
              (SELECT COUNT(*) FROM ap_invoices ai WHERE ai.ap_paymentfile_id = b.id) AS invoice_count,
              (SELECT COUNT(*) FROM ap_invoices ai
-                WHERE ai.ap_paymentfile_id = b.id AND ai.ap_invoice_api_status = 'FAILED') AS invoice_failed_count,
-             (SELECT COUNT(*) FROM ap_invoices_process_log pl WHERE pl.ap_payment_file_detail_id = b.id) AS run_count`,
+                WHERE ai.ap_paymentfile_id = b.id AND ai.ap_invoice_api_status = 'FAILED') AS invoice_failed_count`,
     fromSql: FROM,
   });
 }
@@ -50,27 +49,14 @@ export async function getBatch(id: number) {
   );
   if (!batch) return null;
 
-  const [statusRollup, runs] = await Promise.all([
-    query<RowDataPacket>(
-      `SELECT ap_invoice_api_status AS status, COUNT(*) AS count
-         FROM ap_invoices WHERE ap_paymentfile_id = ?
-        GROUP BY ap_invoice_api_status`,
-      [id],
-    ),
-    query<RowDataPacket>(
-      `SELECT pl.id, pl.proces_datetime, pl.invoice_process_uuid,
-              (SELECT COUNT(*) FROM invoice_response_log rl
-                 WHERE rl.invoice_process_uuid = pl.invoice_process_uuid) AS response_log_count,
-              (SELECT COUNT(*) FROM invoice_summary s
-                 WHERE s.invoice_process_uuid = pl.invoice_process_uuid) AS summary_count
-         FROM ap_invoices_process_log pl
-        WHERE pl.ap_payment_file_detail_id = ?
-        ORDER BY pl.id DESC`,
-      [id],
-    ),
-  ]);
+  const statusRollup = await query<RowDataPacket>(
+    `SELECT ap_invoice_api_status AS status, COUNT(*) AS count
+       FROM ap_invoices WHERE ap_paymentfile_id = ?
+      GROUP BY ap_invoice_api_status`,
+    [id],
+  );
 
-  return { ...batch, statusRollup, runs };
+  return { ...batch, statusRollup };
 }
 
 const INVOICE_LIST_CONFIG: ListConfig = {

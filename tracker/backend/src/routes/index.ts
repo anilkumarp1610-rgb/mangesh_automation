@@ -7,7 +7,6 @@ import { dashboardRouter } from '../modules/dashboard/dashboard.routes.js';
 import { dataTablesRouter } from '../modules/dataTables/dataTables.routes.js';
 import { interfacesRouter } from '../modules/interfaces/interfaces.routes.js';
 import { invoicesRouter } from '../modules/invoices/invoices.routes.js';
-import { processLogsRouter } from '../modules/processLogs/processLogs.routes.js';
 import { responseLogsRouter } from '../modules/responseLogs/responseLogs.routes.js';
 
 export const apiRouter = Router();
@@ -32,7 +31,6 @@ apiRouter.use('/dashboard', dashboardRouter);
 apiRouter.use('/interfaces', interfacesRouter);
 apiRouter.use('/ap-batches', apBatchesRouter);
 apiRouter.use('/ap-invoices', apInvoicesRouter);
-apiRouter.use('/process-logs', processLogsRouter);
 apiRouter.use('/response-logs', responseLogsRouter);
 apiRouter.use('/invoices', invoicesRouter);
 apiRouter.use('/tables', dataTablesRouter);

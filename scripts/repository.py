@@ -160,37 +160,20 @@ def get_open_payment_files(cursor: MySQLCursor, interface_id: int) -> list:
     return rows
 
 
-def get_existing_payment_file_ids(cursor: MySQLCursor, interface_id: int) -> set:
-    cursor.execute(
-        """
-        SELECT ap_batch_payment_file_id
-        FROM ap_payment_file_details
-        WHERE interface_id = %s AND ap_batch_payment_file_id IS NOT NULL
-        """,
-        (interface_id,),
-    )
-    rows = cursor.fetchall()
-    ids = {
-        row["ap_batch_payment_file_id"] if isinstance(row, dict) else row[0]
-        for row in rows
-    }
-    logger.debug(
-        "ap_payment_file_details: %d existing ap_batch_payment_file_id(s) for interface_id=%s",
-        len(ids),
-        interface_id,
-    )
-    return ids
-
-
 def insert_payment_file(
-    cursor: MySQLCursor, interface_id: int, payment_file_id, batch_name: str
+    cursor: MySQLCursor, interface_id: int, payment_file_id, batch_name: str, record: dict
 ) -> int:
-    data = {
-        "ap_batch_name": batch_name,
-        "ap_batch_payment_file_id": payment_file_id,
-        "interface_id": interface_id,
-        "ap_batch_status": "New",
-    }
+    """Inserts one ap_payment_file_details row for a batch just pulled from
+    the Get Payment Batches API -- both the pipeline-owned tracking columns
+    (ap_batch_status/processed_date/log_id) and the raw API metadata
+    (client, ap_payment_file_status, amounts, etc., via BATCH_DETAILS_FIELD_MAP)
+    live on this single row (formerly split into a separate ap_batch_details
+    table -- merged since it was always a 1:1 shadow, never queried alone)."""
+    data = map_record(record, BATCH_DETAILS_FIELD_MAP)
+    data["ap_batch_name"] = batch_name
+    data["ap_batch_payment_file_id"] = payment_file_id
+    data["interface_id"] = interface_id
+    data["ap_batch_status"] = "New"
     payment_file_detail_id = insert(cursor, "ap_payment_file_details", data)
     logger.debug(
         "ap_payment_file_details: inserted id=%s for paymentFileId=%s (interface_id=%s)",
@@ -206,15 +189,9 @@ def insert_ap_invoice(cursor: MySQLCursor, payment_file_detail_id: int, invoice_
         "ap_invoice_number": invoice_number,
         "ap_paymentfile_id": payment_file_detail_id,
     }
-    return insert(cursor, "ap_invoices", data)
-
-
-def insert_batch_details(cursor: MySQLCursor, payment_file_detail_id: int, record: dict) -> int:
-    """Persist the raw Get Payment Batches API record for this payment file
-    (one row per ap_payment_file_details row) into ap_batch_details."""
-    data = map_record(record, BATCH_DETAILS_FIELD_MAP)
-    data["ap_payment_file_detail_id"] = payment_file_detail_id
-    return insert(cursor, "ap_batch_details", data)
+    result = insert(cursor, "ap_invoices", data)
+    logger.debug("insert_ap_invoice: success (ap_invoice_id=%s)", result)
+    return result
 
 
 def insert_batch_invoice_detail(
@@ -227,7 +204,9 @@ def insert_batch_invoice_detail(
     data = map_record(detail_record, BATCH_INVOICE_DETAIL_FIELD_MAP)
     data["ap_payment_file_detail_id"] = payment_file_detail_id
     data["ap_batch_name"] = batch_name
-    return insert(cursor, "ap_batch_invoice_details", data)
+    result = insert(cursor, "ap_batch_invoice_details", data)
+    logger.debug("insert_batch_invoice_detail: success (id=%s)", result)
+    return result
 
 
 def insert_batch_invoice_allocation_value(
@@ -235,7 +214,9 @@ def insert_batch_invoice_allocation_value(
 ) -> int:
     data = map_record(allocation_record, BATCH_INVOICE_ALLOCATION_VALUE_FIELD_MAP)
     data["batch_invoice_detail_id"] = batch_invoice_detail_id
-    return insert(cursor, "ap_batch_invoice_allocation_values", data)
+    result = insert(cursor, "ap_batch_invoice_allocation_values", data)
+    logger.debug("insert_batch_invoice_allocation_value: success (id=%s)", result)
+    return result
 
 
 def insert_batch_invoice_custom(
@@ -243,7 +224,9 @@ def insert_batch_invoice_custom(
 ) -> int:
     data = map_record(custom_record, BATCH_INVOICE_CUSTOM_FIELD_MAP)
     data["batch_invoice_detail_id"] = batch_invoice_detail_id
-    return insert(cursor, "ap_batch_invoice_custom", data)
+    result = insert(cursor, "ap_batch_invoice_custom", data)
+    logger.debug("insert_batch_invoice_custom: success (id=%s)", result)
+    return result
 
 
 def get_invoice_numbers_for_payment_file(cursor: MySQLCursor, payment_file_detail_id: int) -> list:
@@ -265,39 +248,40 @@ def get_invoice_numbers_for_payment_file(cursor: MySQLCursor, payment_file_detai
     return invoice_numbers
 
 
-def create_process_log(cursor: MySQLCursor, payment_file_detail_id: int):
+def start_batch_run(cursor: MySQLCursor, payment_file_detail_id: int) -> str:
+    """Generates a fresh run UUID and records it directly on
+    ap_payment_file_details before any invoice is processed -- replaces the
+    old ap_invoices_process_log table (formerly one row per run; merged in
+    since a batch is only ever processed by one run at a time, and the
+    tracker's own Run Logs history feature was retired alongside it)."""
     process_uuid = str(uuid.uuid4())
-    data = {
-        "proces_datetime": datetime.now(timezone.utc).replace(tzinfo=None),
-        "invoice_process_uuid": process_uuid,
-        "ap_payment_file_detail_id": payment_file_detail_id,
-    }
-    log_id = insert(cursor, "ap_invoices_process_log", data)
-    logger.debug(
-        "ap_invoices_process_log: inserted id=%s uuid=%s for ap_payment_file_detail_id=%s",
-        log_id,
-        process_uuid,
-        payment_file_detail_id,
+    cursor.execute(
+        "UPDATE ap_payment_file_details SET invoice_process_uuid = %s WHERE id = %s",
+        (process_uuid, payment_file_detail_id),
     )
-    return log_id, process_uuid
+    logger.debug(
+        "ap_payment_file_details id=%s: invoice_process_uuid set to %s",
+        payment_file_detail_id,
+        process_uuid,
+    )
+    return process_uuid
 
 
 def update_payment_file_status(
-    cursor: MySQLCursor, payment_file_detail_id: int, status: str, log_id: int
+    cursor: MySQLCursor, payment_file_detail_id: int, status: str
 ) -> None:
     cursor.execute(
         """
         UPDATE ap_payment_file_details
-        SET ap_batch_status = %s, processed_date = %s, log_id = %s
+        SET ap_batch_status = %s, processed_date = %s
         WHERE id = %s
         """,
-        (status, datetime.now(timezone.utc).replace(tzinfo=None), log_id, payment_file_detail_id),
+        (status, datetime.now(timezone.utc).replace(tzinfo=None), payment_file_detail_id),
     )
     logger.debug(
-        "ap_payment_file_details id=%s: ap_batch_status set to '%s' (log_id=%s)",
+        "ap_payment_file_details id=%s: ap_batch_status set to '%s'",
         payment_file_detail_id,
         status,
-        log_id,
     )
 
 
@@ -346,7 +330,9 @@ def insert_response_log(
         "created_datetime": datetime.now(timezone.utc).replace(tzinfo=None),
         "invoice_process_uuid": invoice_process_uuid,
     }
-    return insert(cursor, "invoice_response_log", data)
+    result = insert(cursor, "invoice_response_log", data)
+    logger.debug("insert_response_log: success (log_id=%s)", result)
+    return result
 
 
 def upsert_invoice_summary(
@@ -360,13 +346,17 @@ def upsert_invoice_summary(
     data["log_id"] = log_id
     data["invoice_process_uuid"] = invoice_process_uuid
     data["ap_payment_file_detail_id"] = ap_payment_file_detail_id
-    return upsert(cursor, "invoice_summary", data, unique_cols=["invoice_id"])
+    result = upsert(cursor, "invoice_summary", data, unique_cols=["invoice_id"])
+    logger.debug("upsert_invoice_summary: success (invoice_id=%s)", data.get("invoice_id"))
+    return result
 
 
 def upsert_invoice_detail(cursor: MySQLCursor, record: dict, log_id: int) -> int:
     data = map_record(record, DETAIL_FIELD_MAP)
     data["log_id"] = log_id
-    return upsert(cursor, "invoice_detail", data, unique_cols=["invoice_id"])
+    result = upsert(cursor, "invoice_detail", data, unique_cols=["invoice_id"])
+    logger.debug("upsert_invoice_detail: success (detail_id=%s)", result)
+    return result
 
 
 def insert_invoice_line_detail(cursor: MySQLCursor, detail_id: int, service_total_count) -> int:
@@ -374,19 +364,25 @@ def insert_invoice_line_detail(cursor: MySQLCursor, detail_id: int, service_tota
         "detail_id": detail_id,
         "service_total_count": service_total_count,
     }
-    return insert(cursor, "invoice_line_detail", data)
+    result = insert(cursor, "invoice_line_detail", data)
+    logger.debug("insert_invoice_line_detail: success (line_detail_id=%s)", result)
+    return result
 
 
 def insert_invoice_service(cursor: MySQLCursor, line_detail_id: int, service_record: dict) -> int:
     data = map_record(service_record, SERVICE_FIELD_MAP)
     data["line_detail_id"] = line_detail_id
-    return insert(cursor, "invoice_service", data)
+    result = insert(cursor, "invoice_service", data)
+    logger.debug("insert_invoice_service: success (service_pk=%s)", result)
+    return result
 
 
 def insert_invoice_charge(cursor: MySQLCursor, service_pk: int, charge_record: dict) -> int:
     data = map_record(charge_record, CHARGE_FIELD_MAP)
     data["service_pk"] = service_pk
-    return insert(cursor, "invoice_charge", data)
+    result = insert(cursor, "invoice_charge", data)
+    logger.debug("insert_invoice_charge: success (id=%s)", result)
+    return result
 
 
 def update_ap_invoice_status(
@@ -412,6 +408,11 @@ def update_ap_invoice_status(
             invoice_number,
         ),
     )
+    logger.debug(
+        "update_ap_invoice_status: success (invoice_number=%s, api_status=%s)",
+        invoice_number,
+        api_status,
+    )
 
 
 def store_invoice_record(
@@ -421,6 +422,7 @@ def store_invoice_record(
     invoice_process_uuid: str,
     ap_payment_file_detail_id: int,
 ) -> None:
+    logger.debug("store_invoice_record: in process")
     invoice_id = upsert_invoice_summary(
         cursor, record, log_id, invoice_process_uuid, ap_payment_file_detail_id
     )
@@ -439,4 +441,4 @@ def store_invoice_record(
             for charge_record in service_record.get("invoiceCharges", []) or []:
                 insert_invoice_charge(cursor, service_pk, charge_record)
 
-    _ = invoice_id
+    logger.debug("store_invoice_record: success (invoice_id=%s)", invoice_id)

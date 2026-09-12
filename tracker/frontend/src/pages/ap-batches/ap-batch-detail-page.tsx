@@ -14,13 +14,6 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { formatDateTime } from '@/lib/format';
 import { useListQuery, useResourceQuery } from '@/lib/use-list';
 
-interface Run {
-  id: number;
-  proces_datetime: string;
-  invoice_process_uuid: string;
-  response_log_count: number;
-  summary_count: number;
-}
 interface BatchDetail {
   id: number;
   ap_batch_name: string;
@@ -29,9 +22,8 @@ interface BatchDetail {
   interface_name: string | null;
   ap_batch_status: string;
   processed_date: string | null;
-  log_id: number | null;
+  invoice_process_uuid: string | null;
   statusRollup: { status: string | null; count: number }[];
-  runs: Run[];
 }
 
 interface BatchInvoice {
@@ -94,12 +86,12 @@ export function ApBatchDetailPage() {
     invoicesGrid.apiParams,
   );
 
-  const uuids = (batch.data?.runs ?? []).map((r) => r.invoice_process_uuid).filter(Boolean);
+  const processUuid = batch.data?.invoice_process_uuid;
   const rlGrid = useDataGrid({ prefix: 'rl', defaultSort: { id: 'createdDatetime', desc: true } });
   const responseLogs = useListQuery<Record<string, unknown>>(
     `ap-batch-${id}-rl`,
     '/response-logs',
-    uuids.length ? { ...rlGrid.apiParams, 'filter.invoiceProcessUuid.in': uuids.join(',') } : rlGrid.apiParams,
+    processUuid ? { ...rlGrid.apiParams, 'filter.invoiceProcessUuid': processUuid } : rlGrid.apiParams,
   );
 
   return (
@@ -118,7 +110,7 @@ export function ApBatchDetailPage() {
       />
       <PageHeader
         title={batch.data ? batch.data.ap_batch_name : `Batch ${id}`}
-        description="Batch drill-down: invoices, runs and API response logs."
+        description="Batch drill-down: invoices and API response logs."
         actions={
           <Button variant="outline" size="sm" asChild>
             <Link to="/ap-batches">
@@ -146,7 +138,14 @@ export function ApBatchDetailPage() {
                     value: <StatusBadge value={batch.data.ap_batch_status} />,
                   },
                   { label: 'Processed', value: formatDateTime(batch.data.processed_date) },
-                  { label: 'Log ID', value: batch.data.log_id ?? '—' },
+                  {
+                    label: 'Process UUID',
+                    value: (
+                      <span className="font-mono text-xs">
+                        {batch.data.invoice_process_uuid ?? '—'}
+                      </span>
+                    ),
+                  },
                 ]}
               />
               {batch.data.statusRollup.length > 0 && (
@@ -170,7 +169,6 @@ export function ApBatchDetailPage() {
           <TabsTrigger value="invoices">
             Invoices {invoices.data ? `(${invoices.data.pagination.total})` : ''}
           </TabsTrigger>
-          <TabsTrigger value="runs">Runs ({batch.data?.runs.length ?? 0})</TabsTrigger>
           <TabsTrigger value="logs">
             Response Logs {responseLogs.data ? `(${responseLogs.data.pagination.total})` : ''}
           </TabsTrigger>
@@ -192,44 +190,6 @@ export function ApBatchDetailPage() {
           />
         </TabsContent>
 
-        <TabsContent value="runs" className="mt-4">
-          <div className="overflow-x-auto rounded-md border">
-            <table className="w-full text-sm">
-              <thead className="bg-muted/60 text-left">
-                <tr>
-                  <th className="p-3">Run ID</th>
-                  <th className="p-3">Process UUID</th>
-                  <th className="p-3">When</th>
-                  <th className="p-3">Response Logs</th>
-                  <th className="p-3">Summaries</th>
-                </tr>
-              </thead>
-              <tbody>
-                {(batch.data?.runs ?? []).map((r) => (
-                  <tr
-                    key={r.id}
-                    className="cursor-pointer border-t hover:bg-muted/40"
-                    onClick={() => navigate(`/run-logs/${r.id}`)}
-                  >
-                    <td className="p-3">{r.id}</td>
-                    <td className="p-3 font-mono text-xs">{r.invoice_process_uuid}</td>
-                    <td className="p-3">{formatDateTime(r.proces_datetime)}</td>
-                    <td className="p-3">{r.response_log_count}</td>
-                    <td className="p-3">{r.summary_count}</td>
-                  </tr>
-                ))}
-                {batch.data?.runs.length === 0 && (
-                  <tr>
-                    <td colSpan={5} className="p-6 text-center text-muted-foreground">
-                      No runs yet
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
-          </div>
-        </TabsContent>
-
         <TabsContent value="logs" className="mt-4">
           <DataGrid
             columns={responseLogColumns}
@@ -240,10 +200,10 @@ export function ApBatchDetailPage() {
             isFetching={responseLogs.isFetching}
             error={responseLogs.error}
             onRefresh={() => responseLogs.refetch()}
-            onRowClick={(row) => navigate(`/run-logs/response/${row.log_id}`)}
+            onRowClick={(row) => navigate(`/response-logs/${row.log_id}`)}
             getRowId={(row) => String(row.log_id)}
             exportFilename={`batch-${id}-response-logs`}
-            emptyMessage={uuids.length ? 'No response logs' : 'No runs yet — nothing logged'}
+            emptyMessage={processUuid ? 'No response logs' : 'Not processed yet — nothing logged'}
           />
         </TabsContent>
       </Tabs>

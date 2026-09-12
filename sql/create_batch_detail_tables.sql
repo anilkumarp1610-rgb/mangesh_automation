@@ -1,43 +1,43 @@
 -- ============================================================================
--- Standalone DDL for the 4 tables added by the payment-file-sync feature
--- (scripts/sync_payment_files.py) that a pre-existing database won't have yet:
---   ap_batch_details                    <- raw Get Payment Batches API record
+-- Standalone DDL for the payment-file-sync feature (scripts/sync_payment_files.py)
+-- that a pre-existing database won't have yet:
+--   ap_payment_file_details             <- gains 11 columns for the raw Get Payment
+--                                           Batches API record (client, amounts, etc.)
 --   ap_batch_invoice_details            <- raw invoiceAPBatchDetails[] entry (flat fields)
 --   ap_batch_invoice_allocation_values  <- child rows of ap_batch_invoice_details.allocationValues[]
 --   ap_batch_invoice_custom             <- child rows of ap_batch_invoice_details.custom[]
 --
--- Safe to run against an existing database: CREATE TABLE IF NOT EXISTS, and
--- these are new tables so nothing else is touched. Requires ap_payment_file_details
--- to already exist (see sql/create_tables.sql / sql/migrate_payment_file_processing.sql).
--- This is the same DDL as in sql/create_tables.sql -- kept here standalone so it
--- can be applied on its own to a database that already has everything else.
+-- Safe to run against an existing database: ADD COLUMN IF NOT EXISTS / CREATE
+-- TABLE IF NOT EXISTS throughout (requires MySQL 8.0.29+ for the former).
+-- Requires ap_payment_file_details to already exist (see sql/create_tables.sql
+-- / sql/migrate_payment_file_processing.sql). This is the same DDL as in
+-- sql/create_tables.sql -- kept here standalone so it can be applied on its
+-- own to a database that already has everything else.
+--
+-- Note: an earlier version of this script created a separate ap_batch_details
+-- table instead of adding these columns directly to ap_payment_file_details.
+-- If you already ran that version, use sql/migrate_merge_ap_batch_details.sql
+-- instead (or in addition, it's idempotent) to fold that table in.
 -- ============================================================================
 
 USE airflow;
 
 -- Raw response of the Get Payment Batches API -- GET /invoices/invoiceAPBatches
--- -- one row per ap_payment_file_details row inserted by sync_payment_files.py,
--- keyed to it 1:1.
-CREATE TABLE IF NOT EXISTS ap_batch_details (
-    id                          BIGINT AUTO_INCREMENT PRIMARY KEY,
-    ap_payment_file_detail_id   INT NOT NULL,
-    client                      VARCHAR(200),
-    payment_file_id             INT,
-    ap_created_date             DATETIME,
-    ap_batch_name                VARCHAR(100),
-    ap_payment_file_status       VARCHAR(50),
-    no_of_invoices               INT,
-    no_of_vendors                INT,
-    earliest_due_date            DATETIME,
-    currency                     VARCHAR(10),
-    invoice_amount                DECIMAL(18,2),
-    allocated_amount              DECIMAL(18,2),
-    detail_invoice_amount         DECIMAL(18,2),
-    fetched_datetime              DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    KEY ix_batch_details_payment_file_id (payment_file_id),
-    CONSTRAINT fk_batch_details_payment_file FOREIGN KEY (ap_payment_file_detail_id)
-        REFERENCES ap_payment_file_details (id)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+-- -- these columns hold the API record for whichever batch sync_payment_files.py
+-- just inserted this row for. ap_batch_status/processed_date/log_id remain
+-- pipeline-owned, distinct from the upstream ap_payment_file_status column.
+ALTER TABLE ap_payment_file_details
+    ADD COLUMN IF NOT EXISTS client                VARCHAR(200),
+    ADD COLUMN IF NOT EXISTS ap_created_date       DATETIME,
+    ADD COLUMN IF NOT EXISTS ap_payment_file_status VARCHAR(50),
+    ADD COLUMN IF NOT EXISTS no_of_invoices        INT,
+    ADD COLUMN IF NOT EXISTS no_of_vendors         INT,
+    ADD COLUMN IF NOT EXISTS earliest_due_date     DATETIME,
+    ADD COLUMN IF NOT EXISTS currency              VARCHAR(10),
+    ADD COLUMN IF NOT EXISTS invoice_amount        DECIMAL(18,2),
+    ADD COLUMN IF NOT EXISTS allocated_amount      DECIMAL(18,2),
+    ADD COLUMN IF NOT EXISTS detail_invoice_amount DECIMAL(18,2),
+    ADD COLUMN IF NOT EXISTS fetched_datetime      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP;
 
 -- Raw response of the Get Invoice List API -- GET
 -- /invoices/invoiceAPBatchesDetails?paymentFileId=... -- one row per

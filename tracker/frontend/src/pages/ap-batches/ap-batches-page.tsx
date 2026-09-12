@@ -19,7 +19,6 @@ interface BatchRow {
   processed_date: string | null;
   invoice_count: number;
   invoice_failed_count: number;
-  run_count: number;
 }
 
 export function ApBatchesPage() {
@@ -63,25 +62,6 @@ export function ApBatchesPage() {
         cell: ({ getValue }) => {
           const n = getValue() as number;
           return n > 0 ? <span className="font-medium text-destructive">{n}</span> : n;
-        },
-      },
-      {
-        accessorKey: 'run_count',
-        header: 'Runs',
-        cell: ({ row }) => {
-          const n = row.original.run_count;
-          if (!n) return <span className="text-muted-foreground">0</span>;
-          return (
-            <button
-              className="font-medium text-primary underline-offset-2 hover:underline"
-              onClick={(e) => {
-                e.stopPropagation();
-                navigate(`/run-logs?p_f_batchId=${row.original.id}`);
-              }}
-            >
-              {n}
-            </button>
-          );
         },
       },
       {

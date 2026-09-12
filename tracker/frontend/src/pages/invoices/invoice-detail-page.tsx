@@ -40,12 +40,7 @@ export function InvoiceDetailPage() {
         items={[
           { label: 'Interfaces', to: '/interfaces' },
           { label: 'AP Batches', to: '/ap-batches' },
-          ...(b
-            ? [
-                { label: b.ap_batch_name, to: `/ap-batches/${b.id}` },
-                { label: 'Runs', to: `/run-logs?p_f_batchId=${b.id}` },
-              ]
-            : []),
+          ...(b ? [{ label: b.ap_batch_name, to: `/ap-batches/${b.id}` }] : []),
           { label: inv ? `Invoice ${inv.invoiceNumber}` : `Invoice ${invoiceId}` },
         ]}
       />

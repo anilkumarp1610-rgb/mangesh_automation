@@ -11,8 +11,6 @@ import { InvoiceDetailPage } from '@/pages/invoices/invoice-detail-page';
 import { InvoicesPage } from '@/pages/invoices/invoices-page';
 import { Placeholder } from '@/pages/placeholder';
 import { ResponseLogDetailPage } from '@/pages/run-logs/response-log-detail-page';
-import { RunDetailPage } from '@/pages/run-logs/run-detail-page';
-import { RunLogsPage } from '@/pages/run-logs/run-logs-page';
 
 export const router = createBrowserRouter([
   {
@@ -26,9 +24,7 @@ export const router = createBrowserRouter([
       { path: 'ap-invoices/:id', element: <ApInvoiceDetailPage /> },
       { path: 'invoices', element: <InvoicesPage /> },
       { path: 'invoices/:invoiceId', element: <InvoiceDetailPage /> },
-      { path: 'run-logs', element: <RunLogsPage /> },
-      { path: 'run-logs/:id', element: <RunDetailPage /> },
-      { path: 'run-logs/response/:id', element: <ResponseLogDetailPage /> },
+      { path: 'response-logs/:id', element: <ResponseLogDetailPage /> },
       { path: 'tables', element: <DataTablesPage /> },
       { path: 'tables/:table', element: <DataTablePage /> },
       { path: '*', element: <Placeholder title="Not found" phase="—" /> },

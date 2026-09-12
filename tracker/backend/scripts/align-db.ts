@@ -8,9 +8,11 @@
  * Usage:  npx tsx scripts/align-db.ts          (report + apply)
  *         npx tsx scripts/align-db.ts --check   (report only, no changes)
  *
- * Intentional deviation from the scripts: ap_payment_file_details.id and
- * ap_invoices_process_log.id are left AUTO_INCREMENT (tracker migrations 001/002)
- * so the tracker UI can insert batches / runs.
+ * Intentional deviation from the scripts: ap_payment_file_details.id is left
+ * AUTO_INCREMENT (tracker migration 001) so the tracker UI can insert batches.
+ * (Migration 002 made the now-retired ap_invoices_process_log.id AUTO_INCREMENT
+ * too -- moot since that table was merged into ap_payment_file_details, see
+ * sql/migrate_merge_ap_invoices_process_log.sql.)
  */
 import type { RowDataPacket } from 'mysql2';
 import { closePool, pool } from '../src/db/pool.js';
@@ -151,22 +153,6 @@ const steps: Step[] = [
     needed: async () => !(await hasColumn('invoice_summary', 'ap_payment_file_detail_id')),
     apply:
       'ALTER TABLE invoice_summary ADD COLUMN ap_payment_file_detail_id INT DEFAULT NULL AFTER invoice_process_uuid',
-  },
-  {
-    label: 'FK fk_process_log_payment_file (ap_invoices_process_log → ap_payment_file_details)',
-    needed: async () => !(await hasFk('fk_process_log_payment_file')),
-    guard: async () => {
-      const rows = await q<RowDataPacket & { c: number }>(
-        `SELECT COUNT(*) AS c FROM ap_invoices_process_log pl
-          LEFT JOIN ap_payment_file_details b ON b.id = pl.ap_payment_file_detail_id
-          WHERE pl.ap_payment_file_detail_id IS NOT NULL AND b.id IS NULL`,
-      );
-      return Number(rows[0]?.c ?? 0) > 0
-        ? `${rows[0]!.c} ap_invoices_process_log row(s) reference a missing batch id`
-        : null;
-    },
-    apply:
-      'ALTER TABLE ap_invoices_process_log ADD CONSTRAINT fk_process_log_payment_file FOREIGN KEY (ap_payment_file_detail_id) REFERENCES ap_payment_file_details (id)',
   },
   {
     label: 'FK fk_summary_payment_file (invoice_summary → ap_payment_file_details)',

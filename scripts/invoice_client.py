@@ -1,6 +1,10 @@
+import logging
+
 import requests
 
 from config import InvoiceApiConfig
+
+logger = logging.getLogger(__name__)
 
 
 def get_payment_batches(
@@ -22,7 +26,10 @@ def get_payment_batches(
         "Authorization": f"Bearer {token}",
     }
 
-    return requests.get(url, params=params, headers=headers, timeout=60)
+    logger.debug("get_payment_batches: calling GET %s (page=%s)", url, page)
+    response = requests.get(url, params=params, headers=headers, timeout=60)
+    logger.debug("get_payment_batches: HTTP %s (page=%s)", response.status_code, page)
+    return response
 
 
 def get_invoice_list(
@@ -44,7 +51,17 @@ def get_invoice_list(
         "Authorization": f"Bearer {token}",
     }
 
-    return requests.get(url, params=params, headers=headers, timeout=60)
+    logger.debug(
+        "get_invoice_list: calling GET %s (paymentFileId=%s, page=%s)", url, payment_file_id, page
+    )
+    response = requests.get(url, params=params, headers=headers, timeout=60)
+    logger.debug(
+        "get_invoice_list: HTTP %s (paymentFileId=%s, page=%s)",
+        response.status_code,
+        payment_file_id,
+        page,
+    )
+    return response
 
 
 def get_invoice(cfg: InvoiceApiConfig, token: str, invoice_number: str) -> requests.Response:

@@ -23,9 +23,9 @@ const REQUIRED: { table: string; column: string; fix: string }[] = [
     fix: 'npx tsx scripts/align-db.ts',
   },
   {
-    table: 'ap_invoices_process_log',
-    column: 'ap_payment_file_detail_id',
-    fix: 'apply sql/create_tables.sql',
+    table: 'ap_payment_file_details',
+    column: 'invoice_process_uuid',
+    fix: 'apply sql/migrate_merge_ap_invoices_process_log.sql',
   },
 ];
 

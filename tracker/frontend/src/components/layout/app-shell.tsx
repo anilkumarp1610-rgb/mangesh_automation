@@ -1,14 +1,13 @@
-import { FileText, LayoutDashboard, ListTree, ScrollText } from 'lucide-react';
+import { FileText, LayoutDashboard, ListTree } from 'lucide-react';
 import { NavLink, Outlet } from 'react-router-dom';
 import { ThemeToggle } from '@/components/theme-toggle';
 import { cn } from '@/lib/utils';
 
-// AP Batches and Invoice Explorer are reached by drilling down from Interfaces /
-// Run Logs, so they are not top-level nav items (routes still exist).
+// AP Batches and Invoice Explorer are reached by drilling down from
+// Interfaces, so they are not top-level nav items (routes still exist).
 const NAV = [
   { to: '/', label: 'Dashboard', icon: LayoutDashboard, end: true },
   { to: '/interfaces', label: 'Interfaces', icon: ListTree },
-  { to: '/run-logs', label: 'Run Logs', icon: ScrollText },
   { to: '/tables', label: 'Data Tables', icon: FileText },
 ];
 

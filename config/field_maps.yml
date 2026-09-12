@@ -117,11 +117,13 @@ Charge:
   usageUnit2Label: usage_unit2_label
   usageUnit2Value: usage_unit2_value
 
+# paymentFileId / apBatchName are deliberately absent here: they're already
+# set explicitly in repository.py::insert_payment_file() from its own
+# payment_file_id/batch_name arguments (ap_payment_file_details.ap_batch_payment_file_id
+# / .ap_batch_name), so mapping them again here would just be redundant.
 BatchDetails:
   client: client
-  paymentFileId: payment_file_id
   apCreatedDate: ap_created_date
-  apBatchName: ap_batch_name
   apPaymentFileStatus: ap_payment_file_status
   noOfInvoices: no_of_invoices
   noOfVendors: no_of_vendors

@@ -6,81 +6,115 @@ their invoice numbers from the upstream platform (Get Payment Batches / Get
 Invoice List APIs) into `ap_payment_file_details` / `ap_invoices`, then finds
 every open (`'New'`) payment-file batch, pulls the invoice numbers under each
 batch from `airflow.ap_invoices`, fetches full invoice detail for each
-invoice number, writes the outcome back
-onto `ap_invoices`, and stores the full nested API response
-(summary → detail → line items → services → charges) into normalized tables.
-Each batch gets its own tracking UUID (`ap_invoices_process_log`) so the CSV
-export generated for that batch only contains that batch's invoices — instead
-of every invoice ever processed — and the batch's status is written back to
+invoice number, writes the outcome back onto `ap_invoices`, and stores the
+full nested API response (summary → detail → line items → services →
+charges) into normalized tables. Each run gets its own tracking UUID
+(`ap_payment_file_details.invoice_process_uuid`) so the CSV export generated
+for that batch only contains that run's invoices — instead of every invoice
+ever processed — and the batch's status is written back to
 `ap_payment_file_details` (`Success`/`Failure`) when it finishes.
+
+## Contents
+
+- [1. Architecture / Process Flow](#1-architecture--process-flow)
+- [1a. Folder Structure](#1a-folder-structure)
+- [2. Database Schema](#2-database-schema)
+- [3. Project Files](#3-project-files)
+- [4. Configuration](#4-configuration)
+- [5. Function Reference](#5-function-reference)
+- [6. Status Derivation Logic](#6-status-derivation-logic)
+- [7. Execution Steps](#7-execution-steps)
+  - [7.1 Prerequisites](#71-prerequisites)
+  - [7.2 Install dependencies](#72-install-dependencies)
+  - [7.3 Create / migrate the database schema](#73-create--migrate-the-database-schema)
+  - [7.4 Configure credentials](#74-configure-credentials)
+  - [7.5 Run the pipeline directly](#75-run-the-pipeline-directly)
+  - [7.6 Run the pipeline via Airflow](#76-run-the-pipeline-via-airflow)
+  - [7.7 Ad hoc data inspection](#77-ad-hoc-data-inspection)
+  - [7.8 Export all invoice data to CSV standalone (no run scoping)](#78-export-all-invoice-data-to-csv-standalone-no-run-scoping)
+- [8. Technical Notes](#8-technical-notes)
+
+---
 
 ## 1. Architecture / Process Flow
 
+```mermaid
+flowchart TD
+    IC[("interfaceconfiguration<br/>WHERE InterfaceId = ?")] --> STEP12["Load interface config<br/><small>process_invoices.py --interface-id</small>"]
+    STEP12 --> AUTH["Authenticate<br/><small>auth_client.py</small>"]
+    AUTH --> SYNC["Step 2a — Sync from upstream API<br/><small>sync_payment_files.py</small>"]
+    SYNC --> FIND["Step 3 — Find open payment files<br/><small>ap_batch_status = 'New'</small>"]
+    FIND --> LOOP1
+
+    subgraph LOOP1["for each open payment file (process_payment_file)"]
+        direction TB
+        PULL["Step 4 — Pull invoice numbers"] --> LOG["Step 5 — Create process log + UUID"]
+        LOG --> LOOP2
+
+        subgraph LOOP2["for each invoice number"]
+            direction TB
+            CALL["Get Invoice API call"] --> RESPLOG["invoice_response_log"]
+            RESPLOG --> UPD["update ap_invoices status"]
+            UPD --> STORE["on SUCCESS: summary → detail →<br/>line_detail → service → charge"]
+        end
+
+        LOOP2 --> CSV["Step 6 — Generate CSV export<br/><small>scoped to invoice_process_uuid</small>"]
+        CSV --> SFTP["Upload to SFTP + send<br/>success/failure email"]
+        SFTP --> STATUS["Update ap_payment_file_details<br/>Success / Failure"]
+    end
 ```
-                 ┌───────────────────────────────┐
-                 │ interfaceconfiguration          │  (one row per interface,
-                 │  WHERE InterfaceId = ?            │   keyed by InterfaceId)
-                 └───────────────┬───────────────────┘
-                                  ▼
-        ┌───────────────────────────────────────────────────────────────┐
-        │ Step 1-2: Load interface config  (process_invoices.py --interface-id) │
-        │   repository.py::load_interface_configuration() maps SFTP_*/SMTP_*/      │
-        │   Platform_*/Email_* columns onto config.py's dotted keys, overlaid          │
-        │   onto appsettings.yml (DB values win; NULL columns fall back to yml)          │
-        └───────────────┬───────────────────────────────────────────────────────────┘
-                         ▼
-        ┌───────────────────────────────────────────────────────────────┐
-        │ Authenticate  (auth_client.py)                                      │
-        │   POST {BaseUri}/api/v2/Authenticate -> Bearer token                   │
-        └───────────────┬───────────────────────────────────────────────────────┘
-                         ▼
-        ┌───────────────────────────────────────────────────────────────────────────┐
-        │ Step 2a: Sync payment files + invoices from upstream  (sync_payment_files.py) │
-        │   GET {BaseUri}/invoices/invoiceAPBatches (fromDate/toDate window)             │
-        │     -> new batches inserted into ap_payment_file_details (ap_batch_status='New') │
-        │     -> raw record also inserted into ap_batch_details                              │
-        │   for each new batch: GET {BaseUri}/invoices/invoiceAPBatchesDetails?paymentFileId= │
-        │     -> invoiceAPBatchDetails[].invoiceNumber inserted into ap_invoices              │
-        │     -> each invoiceAPBatchDetails[] entry also inserted into ap_batch_invoice_details│
-        │        -> its allocationValues[] -> ap_batch_invoice_allocation_values (child rows)  │
-        │        -> its custom[] -> ap_batch_invoice_custom (child rows)                       │
-        └───────────────┬───────────────────────────────────────────────────────────────┘
-                         ▼
-        ┌───────────────────────────────────────────────────────────────┐
-        │ Step 3: Find open payment files  (repository.py::get_open_payment_files)  │
-        │   SELECT * FROM ap_payment_file_details                                  │
-        │   WHERE interface_id = ? AND ap_batch_status = 'New'                        │
-        └───────────────┬───────────────────────────────────────────────────────────┘
-                         ▼
-        ┌── for each open payment file (process_invoices.py::process_payment_file) ──────────┐
-        │                                                                                       │
-        │  Step 4: Pull invoices for this payment file                                            │
-        │    SELECT DISTINCT ap_invoice_number FROM ap_invoices                                     │
-        │    WHERE ap_paymentfile_id = <payment file's id>                                            │
-        │                                                                                                │
-        │  Step 5: Create process log  (repository.py::create_process_log)                                │
-        │    INSERT INTO ap_invoices_process_log                                                             │
-        │      (proces_datetime, invoice_process_uuid, ap_payment_file_detail_id)                              │
-        │    -> one row per payment-file run; generates a fresh UUID for this run                                │
-        │                                                                                                            │
-        │  Step 6: Process every invoice in this batch  (process_invoices.py::process_invoice)                       │
-        │    ┌─ for each invoice_number ──────────────────────────────────────────────────┐                          │
-        │    │  Get Invoice API call -> invoice_response_log (+ invoice_process_uuid)         │                          │
-        │    │  update ap_invoices (status / raw response)                                       │                          │
-        │    │  on SUCCESS: invoice_summary (+ invoice_process_uuid,                                │                          │
-        │    │    ap_payment_file_detail_id) -> invoice_detail -> invoice_line_detail                  │                          │
-        │    │    -> invoice_service -> invoice_charge                                                   │                          │
-        │    └───────────────────────────────────────────────────────────────────────────────┘                          │
-        │                                                                                                            │
-        │  Generate output CSV, scoped to this run  (export_invoices_csv.py)                                            │
-        │    base query (invoice_summary) filtered WHERE invoice_process_uuid = <this run's uuid>                         │
-        │    -- everything joined afterwards inherits the scoping through invoice_id                                        │
-        │  Upload to SFTP + send success/failure email  (delivery.py)                                                        │
-        │                                                                                                            │
-        │  Update ap_payment_file_details: ap_batch_status = 'Success'/'Failure',                                        │
-        │    processed_date = now, log_id = <this run's ap_invoices_process_log.id>                                          │
-        └────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
-```
+
+The diagram above is the shape of the flow; the exact tables and queries at
+each step are:
+
+1. **Load interface config** — `process_invoices.py --interface-id N` →
+   `repository.py::load_interface_configuration()` maps `SFTP_*`/`SMTP_*`/
+   `Platform_*`/`Email_*` columns onto `config.py`'s dotted keys, overlaid
+   onto `appsettings.yml` (DB values win; `NULL` columns fall back to YAML).
+2. **Authenticate** (`auth_client.py`) — `POST {BaseUri}/api/v2/Authenticate`
+   → Bearer token.
+3. **Step 2a — Sync payment files + invoices from upstream**
+   (`sync_payment_files.py`) — no dedup, every batch the API returns gets a
+   fresh insert every run, even ones already seen (see §8):
+   - `GET {BaseUri}/invoices/invoiceAPBatches` (`fromDate`/`toDate` window) →
+     every batch inserted as a new `ap_payment_file_details` row — the
+     pipeline-owned tracking columns (`ap_batch_status='New'`, `processed_date`,
+     `invoice_process_uuid`) alongside the raw API record (`client`,
+     `ap_payment_file_status`, amounts, etc.) on the same row.
+   - for each batch: `GET {BaseUri}/invoices/invoiceAPBatchesDetails?paymentFileId=...`
+     → `invoiceAPBatchDetails[].invoiceNumber` inserted into `ap_invoices`;
+     each entry is also inserted into `ap_batch_invoice_details`, with its
+     nested `allocationValues[]`/`custom[]` inserted into their own child
+     tables.
+4. **Step 3 — Find open payment files**
+   (`repository.py::get_open_payment_files()`):
+   `SELECT * FROM ap_payment_file_details WHERE interface_id = ? AND ap_batch_status = 'New'`.
+
+**For each open payment file** (`process_invoices.py::process_payment_file`):
+
+5. **Step 4 — Pull invoices for this payment file** —
+   `SELECT DISTINCT ap_invoice_number FROM ap_invoices WHERE ap_paymentfile_id = <payment file's id>`.
+6. **Step 5 — Start the run** (`repository.py::start_batch_run()`) —
+   `UPDATE ap_payment_file_details SET invoice_process_uuid = ? WHERE id = ?`
+   — a freshly generated UUID recorded on the batch row before any invoice is
+   processed (formerly a separate `ap_invoices_process_log` row per run — see
+   §8).
+7. **Step 6 — Process every invoice in this batch**
+   (`process_invoices.py::process_invoice`) — for each `invoice_number`:
+   - Get Invoice API call → `invoice_response_log` (+ `invoice_process_uuid`)
+   - update `ap_invoices` (status / raw response)
+   - on `SUCCESS`: `invoice_summary` (+ `invoice_process_uuid`,
+     `ap_payment_file_detail_id`) → `invoice_detail` → `invoice_line_detail`
+     → `invoice_service` → `invoice_charge`
+8. **Generate output CSV, scoped to this run** (`export_invoices_csv.py`) —
+   base query (`invoice_summary`) filtered
+   `WHERE invoice_process_uuid = <this run's uuid>`; everything joined
+   afterwards inherits the scoping through `invoice_id`.
+9. **Upload to SFTP + send success/failure email** (`delivery.py`).
+10. **Update `ap_payment_file_details`**: `ap_batch_status = 'Success'/'Failure'`,
+    `processed_date = now`.
+
+---
 
 ## 1a. Folder Structure
 
@@ -105,14 +139,21 @@ mangesh_automation/
 ├── dags/
 │   └── invoice_sync_dag.py    Airflow DAG that runs process_invoices.main(interface_id=...)
 ├── sql/
-│   ├── create_tables.sql                  full DDL for a fresh install + seed data
+│   ├── create_tables.sql                   full DDL for a fresh install + seed data
 │   ├── migrate_payment_file_processing.sql catch-up ALTERs for a pre-existing DB
-│   └── create_invoice_response_log.sql    standalone DDL for the log table
+│   ├── create_invoice_response_log.sql     standalone DDL for the log table
+│   ├── create_batch_detail_tables.sql      standalone DDL for the payment-file-sync feature
+│   ├── migrate_merge_ap_batch_details.sql  folds a retired 1:1 table into ap_payment_file_details
+│   ├── migrate_merge_ap_invoices_process_log.sql  folds a retired run-history table into ap_payment_file_details
+│   ├── drop_aprequestpaymentdetails.sql    drops a retired legacy table
+│   └── drop_aprequestdetails.sql           drops a retired legacy table
 ├── output/                    generated CSV export lands here (see Output config)
 ├── logs/                      one timestamped log file per process_invoices.py run
 ├── requirements.txt
 └── README.md
 ```
+
+---
 
 ## 2. Database Schema
 
@@ -129,12 +170,10 @@ already exist, so it won't retroactively add new columns.
 |---|---|---|
 | `interfaceconfiguration` | One wide row per interface (SFTP/SMTP/Invoice API/email settings) | `InterfaceId` (PK) |
 | `ap_invoices` | Source list of invoices to process; also stores the last API call outcome | `ap_paymentfile_id` → `ap_payment_file_details.id` |
-| `ap_payment_file_details` | One row per payment-file batch; `ap_batch_status` (`New`/`Success`/`Failure`) drives the foreach loop | `interface_id` → `interfaceconfiguration.InterfaceId` |
-| `ap_batch_details` | Raw Get Payment Batches API record for a batch (client, status, counts, amounts) | `ap_payment_file_detail_id` → `ap_payment_file_details.id` (1:1) |
+| `ap_payment_file_details` | One row per payment-file batch **per sync pull** — `ap_batch_payment_file_id` is *not* unique; the same upstream batch gets a fresh row (and is fully reprocessed) every run that its `paymentFileId` still falls inside the sync window, see §8. `ap_batch_status` (`New`/`Success`/`Failure`) drives the foreach loop. `invoice_process_uuid` holds the current run's UUID (merged in from a separate `ap_invoices_process_log` table, see §8) and is threaded into `invoice_response_log` and `invoice_summary`. Also carries the raw Get Payment Batches API record for that batch (`client`, `ap_payment_file_status`, `no_of_invoices`, `no_of_vendors`, `earliest_due_date`, `currency`, `invoice_amount`, `allocated_amount`, `detail_invoice_amount`, `fetched_datetime`) — merged in from a separate `ap_batch_details` table, see §8 | `interface_id` → `interfaceconfiguration.InterfaceId` |
 | `ap_batch_invoice_details` | Raw `invoiceAPBatchDetails[]` entry from the Get Invoice List API — flat invoice-line fields (org/vendor/dates/amounts) | `ap_payment_file_detail_id` → `ap_payment_file_details.id` |
 | `ap_batch_invoice_allocation_values` | `invoiceAPBatchDetails[].allocationValues[]` child rows | `batch_invoice_detail_id` → `ap_batch_invoice_details.id` |
 | `ap_batch_invoice_custom` | `invoiceAPBatchDetails[].custom[]` child rows | `batch_invoice_detail_id` → `ap_batch_invoice_details.id` |
-| `ap_invoices_process_log` | One row per payment-file **run**; its `invoice_process_uuid` is threaded into `invoice_response_log` and `invoice_summary` | `ap_payment_file_detail_id` → `ap_payment_file_details.id` |
 | `invoice_response_log` | One row per Get Invoice API call: raw JSON response, HTTP status, timestamp, `invoice_process_uuid` | root of the invoice-detail chain |
 | `invoice_summary` | Short `records[]` shape from the API | `invoice_id` (unique) · `log_id` → `invoice_response_log` · `invoice_process_uuid` / `ap_payment_file_detail_id` → this run's batch |
 | `invoice_detail` | Full `records[]` shape (all ~77 fields, when `expand=true`) | `invoice_id` (unique) → `invoice_summary` · `log_id` → `invoice_response_log` |
@@ -142,15 +181,19 @@ already exist, so it won't retroactively add new columns.
 | `invoice_service` | `invoiceServices[]` | `line_detail_id` → `invoice_line_detail` (cascade delete) |
 | `invoice_charge` | `invoiceCharges[]` | `service_pk` → `invoice_service` (cascade delete) |
 
-**Idempotency**: `invoice_summary` / `invoice_detail` are upserted on `invoice_id`
-(`ON DUPLICATE KEY UPDATE`) — so re-processing the same invoice under a *new*
-run updates that invoice's `invoice_process_uuid` in place rather than adding a
-row. Nested rows (`invoice_line_detail` → `invoice_service` → `invoice_charge`)
-are deleted and re-inserted per `detail_id` on every run. What used to make
-re-runs look like "duplicates" was the CSV export pulling the whole table's
-history unscoped; the export now filters `invoice_summary` by the current run's
-`invoice_process_uuid` (see §1), so each batch's output only contains that
-batch's invoices.
+> [!NOTE]
+> **Idempotency**: `invoice_summary` / `invoice_detail` are upserted on
+> `invoice_id` (`ON DUPLICATE KEY UPDATE`) — so re-processing the same
+> invoice under a *new* run updates that invoice's `invoice_process_uuid` in
+> place rather than adding a row. Nested rows (`invoice_line_detail` →
+> `invoice_service` → `invoice_charge`) are deleted and re-inserted per
+> `detail_id` on every run. What used to make re-runs look like
+> "duplicates" was the CSV export pulling the whole table's history
+> unscoped; the export now filters `invoice_summary` by the current run's
+> `invoice_process_uuid` (see §1), so each batch's output only contains
+> that batch's invoices.
+
+---
 
 ## 3. Project Files
 
@@ -165,7 +208,7 @@ batch's invoices.
 | `scripts/auth_client.py` | `authenticate(cfg)` — calls the Authenticate API, returns the bearer token |
 | `scripts/invoice_client.py` | `get_invoice(cfg, token, invoice_number)` — calls the Get Invoice API; `get_payment_batches(cfg, token, from_date, to_date, page)` — calls the Get Payment Batches API; `get_invoice_list(cfg, token, payment_file_id, page)` — calls the Get Invoice List API |
 | `scripts/repository.py` | All DB read/write functions (see §5) |
-| `scripts/sync_payment_files.py` | `sync_payment_files(cursor, cfg, token, interface_id)` — pulls new payment-file batches (Get Payment Batches API) into `ap_payment_file_details` + the raw record into `ap_batch_details`, then for each new batch pulls its invoice numbers (Get Invoice List API) into `ap_invoices` + each raw `invoiceAPBatchDetails[]` entry into `ap_batch_invoice_details` (its nested `allocationValues[]`/`custom[]` into their own child tables); paginates both APIs via `data.totalPages` and skips batches/invoice numbers already stored |
+| `scripts/sync_payment_files.py` | `sync_payment_files(cursor, cfg, token, interface_id)` — pulls new payment-file batches (Get Payment Batches API) into `ap_payment_file_details` (tracking columns + the raw API record, on the same row), then for each new batch pulls its invoice numbers (Get Invoice List API) into `ap_invoices` + each raw `invoiceAPBatchDetails[]` entry into `ap_batch_invoice_details` (its nested `allocationValues[]`/`custom[]` into their own child tables); paginates both APIs via `data.totalPages` and skips batches/invoice numbers already stored |
 | `scripts/process_invoices.py` | Main orchestrator — entry point for the full pipeline, takes `--interface-id` |
 | `scripts/fetch_ap_invoices.py` | Standalone helper — reads `ap_invoices` into a pandas DataFrame (ad hoc use / debugging) |
 | `scripts/export_invoices_csv.py` | Joins `invoice_summary` → `invoice_detail` → `invoice_line_detail` → `invoice_service` → `invoice_charge`, optionally scoped to one `invoice_process_uuid`, and writes one combined, timestamped CSV |
@@ -174,9 +217,13 @@ batch's invoices.
 | `sql/create_tables.sql` | Full DDL for every table (fresh-install shape) + seed rows for `ap_invoices` / `ap_payment_file_details` |
 | `sql/migrate_payment_file_processing.sql` | Catch-up `ALTER TABLE` statements for a database that already has these tables in their older shape |
 | `sql/create_invoice_response_log.sql` | Standalone DDL for just `invoice_response_log` |
-| `sql/create_batch_detail_tables.sql` | Standalone DDL for the 4 payment-file-sync tables (`ap_batch_details`, `ap_batch_invoice_details`, `ap_batch_invoice_allocation_values`, `ap_batch_invoice_custom`) — for a database that already runs this pipeline but predates that feature |
+| `sql/create_batch_detail_tables.sql` | Standalone DDL for the payment-file-sync feature — adds the 11 raw-API columns to `ap_payment_file_details` plus `ap_batch_invoice_details` / `ap_batch_invoice_allocation_values` / `ap_batch_invoice_custom` — for a database that already runs this pipeline but predates that feature |
+| `sql/migrate_merge_ap_batch_details.sql` | Folds the now-retired `ap_batch_details` table into `ap_payment_file_details` — only needed if you ran an earlier version of this pipeline that had `ap_batch_details` as a separate table (see §8) |
+| `sql/migrate_merge_ap_invoices_process_log.sql` | Folds the now-retired `ap_invoices_process_log` table into `ap_payment_file_details` (`invoice_process_uuid` column, `log_id` dropped) — only needed if you ran an earlier version of this pipeline that had that table (see §8); also retires the tracker's "Run Logs" feature |
 | `sql/drop_aprequestpaymentdetails.sql` / `sql/drop_aprequestdetails.sql` | Drop the two legacy tables neither this pipeline nor the tracker ever read (see §8) |
 | `requirements.txt` | Python dependencies |
+
+---
 
 ## 4. Configuration
 
@@ -285,7 +332,12 @@ columns — it must still return the `JoinOn` column for that entry.
 `Logging.Folder`/`Output.Folder` may be relative (resolved against the project
 root) or absolute; both are created automatically if missing.
 
+---
+
 ## 5. Function Reference
+
+<details>
+<summary><strong>Click to expand — one entry per script, every public function</strong></summary>
 
 ### `scripts/config.py`
 - `load_config(path=APPSETTINGS_PATH, interface_values: dict | None = None) -> AppConfig` —
@@ -303,18 +355,17 @@ root) or absolute; both are created automatically if missing.
   ap_payment_file_details WHERE interface_id = ? AND ap_batch_status = 'New'`.
 - `get_invoice_numbers_for_payment_file(cursor, payment_file_detail_id: int) -> list` —
   distinct `ap_invoice_number`s under that payment file.
-- `get_existing_payment_file_ids(cursor, interface_id: int) -> set` — every
-  upstream `paymentFileId` already present in `ap_payment_file_details` for
-  this interface; used to skip batches already pulled.
-- `insert_payment_file(cursor, interface_id, payment_file_id, batch_name) -> int` —
-  inserts a new `ap_payment_file_details` row (`ap_batch_status='New'`) for a
-  batch just pulled from the Get Payment Batches API.
+- `insert_payment_file(cursor, interface_id, payment_file_id, batch_name, record) -> int` —
+  inserts a new `ap_payment_file_details` row for a batch just pulled from the
+  Get Payment Batches API: the pipeline-owned tracking columns
+  (`ap_batch_status='New'`, `interface_id`, `ap_batch_name`,
+  `ap_batch_payment_file_id`) plus the raw API `record`'s fields
+  (`map_record(BATCH_DETAILS_FIELD_MAP)` — `client`, `ap_payment_file_status`,
+  amounts, etc.) on the same row (formerly a separate `ap_batch_details`
+  table — merged in, see §8).
 - `insert_ap_invoice(cursor, payment_file_detail_id, invoice_number) -> int` —
   inserts a new `ap_invoices` row for an invoice number just pulled from the
   Get Invoice List API.
-- `insert_batch_details(cursor, payment_file_detail_id, record) -> int` —
-  maps + inserts the full raw Get Payment Batches API record into
-  `ap_batch_details`.
 - `insert_batch_invoice_detail(cursor, payment_file_detail_id, batch_name, detail_record) -> int` —
   maps + inserts one `invoiceAPBatchDetails[]` entry's flat fields into
   `ap_batch_invoice_details`.
@@ -323,11 +374,12 @@ root) or absolute; both are created automatically if missing.
   `ap_batch_invoice_allocation_values`.
 - `insert_batch_invoice_custom(cursor, batch_invoice_detail_id, custom_record) -> int` —
   maps + inserts one `custom[]` entry into `ap_batch_invoice_custom`.
-- `create_process_log(cursor, payment_file_detail_id: int) -> (log_id, invoice_process_uuid)` —
-  inserts one `ap_invoices_process_log` row for this run and returns its id
-  and freshly generated UUID.
-- `update_payment_file_status(cursor, payment_file_detail_id, status, log_id) -> None` —
-  sets `ap_batch_status`, `processed_date = now()`, and `log_id` on
+- `start_batch_run(cursor, payment_file_detail_id: int) -> str` — generates a
+  fresh run UUID and records it directly on `ap_payment_file_details`
+  (`invoice_process_uuid`) before any invoice is processed; returns the UUID
+  (formerly inserted a separate `ap_invoices_process_log` row — see §8).
+- `update_payment_file_status(cursor, payment_file_detail_id, status) -> None` —
+  sets `ap_batch_status` and `processed_date = now()` on
   `ap_payment_file_details`.
 - `upsert(cursor, table, data, unique_cols=None) -> int` — generic
   `INSERT ... ON DUPLICATE KEY UPDATE`, returns the affected row's PK.
@@ -353,16 +405,25 @@ root) or absolute; both are created automatically if missing.
   if `payload.success` is falsy for any page.
 - `sync_payment_files(cursor, cfg, token, interface_id) -> list[int]` —
   Step 2a of the pipeline (see §1). Calls the Get Payment Batches API over
-  `[today - GetPaymentBatches.LookbackDays, today]` (UTC), skips any
-  `paymentFileId` already in `ap_payment_file_details` for this interface, and
-  for each new one: inserts `ap_payment_file_details` (`insert_payment_file`)
-  + the raw record (`insert_batch_details`), then calls the Get Invoice List
-  API for that `paymentFileId`, inserts each `invoiceAPBatchDetails[]` entry
-  into `ap_batch_invoice_details` (+ its `allocationValues[]`/`custom[]` into
-  their child tables) unconditionally, and inserts only the invoice numbers
-  not already stored into `ap_invoices`. Returns the new
-  `ap_payment_file_details.id` values (informational — the next step re-queries
-  by status, so this return value isn't required for the pipeline to pick them up).
+  `[today - GetPaymentBatches.LookbackDays, today]` (UTC) and, for **every**
+  batch returned — no existence check, even if its `paymentFileId` was
+  already seen on a prior run — inserts a fresh `ap_payment_file_details` row
+  (tracking columns + raw API record together, `insert_payment_file`), then
+  calls the Get Invoice List API for that `paymentFileId` and inserts each
+  `invoiceAPBatchDetails[]` entry into `ap_batch_invoice_details` (+ its
+  `allocationValues[]`/`custom[]` into their child tables) and every invoice
+  number into `ap_invoices`, all unconditionally — no dedup check anywhere in
+  this chain, since `payment_file_detail_id` is always a brand-new id.
+  Deliberate: a payment file's invoice list can grow or shrink on the vendor's
+  side, so a `paymentFileId` that reappears (which it will, at least once,
+  since `LookbackDays` deliberately overlaps day to day) gets fully
+  reprocessed from a fresh id rather than diffed against its prior row —
+  new Get Invoice calls, new CSV, new SFTP upload, new email, for the whole
+  batch. Cost is bounded by the date window itself: once a batch ages out of
+  `[today - LookbackDays, today]`, the API stops returning it. Returns every
+  `ap_payment_file_details.id` inserted this run (informational — the next
+  step re-queries by status, so this return value isn't required for the
+  pipeline to pick them up).
 
 ### `scripts/process_invoices.py` — **main entry point**
 
@@ -371,7 +432,7 @@ root) or absolute; both are created automatically if missing.
   — only on `SUCCESS` — persists every record via `store_invoice_record`.
   Returns `SUCCESS` / `PENDING` / `FAILED` (see §6).
 - `process_payment_file(conn, cursor, cfg, token, payment_file: dict) -> None` —
-  runs one open batch end to end: `create_process_log`, loop
+  runs one open batch end to end: `start_batch_run`, loop
   `process_invoice()` over every invoice under that payment file (committing
   after each), generate the run-scoped CSV export, upload to SFTP, then send
   **either** the success email (only if every invoice succeeded) **or** the
@@ -379,7 +440,7 @@ root) or absolute; both are created automatically if missing.
   error message naming the failure count — even though nothing raised an
   exception), before marking `ap_payment_file_details` accordingly. If an
   actual exception is raised anywhere in that sequence (including
-  `create_process_log` itself), it's logged first — before any cleanup is
+  `start_batch_run` itself), it's logged first — before any cleanup is
   attempted — then `conn.rollback()`, the `Failure` status update, and the
   failure email are each attempted independently (one failing doesn't skip or
   hide the others, or the original error). Either way, `process_payment_file`
@@ -393,7 +454,7 @@ root) or absolute; both are created automatically if missing.
   authenticates *after* the `interfaceconfiguration` overlay is applied (so
   the right interface's credentials are used); calls `sync_payment_files()`
   (Step 2a — pulls any new payment files + invoice numbers from the upstream
-  API, see below) and commits — this whole setup phase, up to and including
+  API, see above) and commits — this whole setup phase, up to and including
   the open-payment-files query, is wrapped so any failure is logged with full
   context before re-raising, since a failure here means no payment file can be
   processed at all; then runs `process_payment_file()` for each open payment
@@ -476,6 +537,10 @@ root) or absolute; both are created automatically if missing.
   with a single `PythonOperator` task calling
   `process_invoices.main(interface_id=INTERFACE_ID)`.
 
+</details>
+
+---
+
 ## 6. Status Derivation Logic
 
 **Per invoice** — `process_invoice()` classifies the API response as:
@@ -500,8 +565,11 @@ been attempted:
 | At least one invoice `FAILED` (a handled status, not an exception) — export and SFTP upload still run for whatever succeeded | `Failure` | failure notification (names the failure count), **not** the success email |
 | An exception occurred anywhere in the batch (process log, export, SFTP, or an unhandled error mid-loop) | `Failure` | failure notification, best-effort (its own failure is logged, not raised) |
 
-A batch marked `Failure` is not automatically retried — flip its
-`ap_batch_status` back to `'New'` to have the next run pick it up again.
+> [!TIP]
+> A batch marked `Failure` is not automatically retried — flip its
+> `ap_batch_status` back to `'New'` to have the next run pick it up again.
+
+---
 
 ## 7. Execution Steps
 
@@ -536,13 +604,27 @@ Database that already has `interfaceconfiguration`, `ap_payment_file_details`,
 mysql -h localhost -u sa -p airflow < sql/migrate_payment_file_processing.sql
 ```
 Database already running this pipeline but from before the payment-file sync
-(§1 Step 2a) was added — run the standalone script for just the four new
-tables (`ap_batch_details`, `ap_batch_invoice_details`,
-`ap_batch_invoice_allocation_values`, `ap_batch_invoice_custom`); re-running
-the full `create_tables.sql` also works (`CREATE TABLE IF NOT EXISTS` leaves
-everything else untouched) but this is faster and more targeted:
+(§1 Step 2a) was added — run the standalone script that adds the 11 raw-API
+columns to `ap_payment_file_details` plus the 3 new child tables
+(`ap_batch_invoice_details`, `ap_batch_invoice_allocation_values`,
+`ap_batch_invoice_custom`); re-running the full `create_tables.sql` also works
+(`CREATE TABLE IF NOT EXISTS` leaves everything else untouched) but this is
+faster and more targeted:
 ```bash
 mysql -h localhost -u sa -p airflow < sql/create_batch_detail_tables.sql
+```
+Database that already has a separate `ap_batch_details` table (from an
+earlier version of this pipeline, before it was merged into
+`ap_payment_file_details` — see §8):
+```bash
+mysql -h localhost -u sa -p airflow < sql/migrate_merge_ap_batch_details.sql
+```
+Database that already has a separate `ap_invoices_process_log` table (from an
+earlier version of this pipeline, before it was merged into
+`ap_payment_file_details` — see §8; if you also run the tracker, its "Run
+Logs" pages are retired alongside this):
+```bash
+mysql -h localhost -u sa -p airflow < sql/migrate_merge_ap_invoices_process_log.sql
 ```
 
 ### 7.4 Configure credentials
@@ -550,9 +632,11 @@ Populate the `interfaceconfiguration` row for the interface you're running
 (`SFTP_*`, `SMTP_*`, `Platform_UserId`/`Platform_Password`/`Platform_AppAuthKey`
 for Invoice API auth, `Platform_InstanceUrl` for the base URI, `Email_*`). Any
 column left `NULL` falls back to `config/appsettings.yml`'s `Sftp`/`Email`/
-`InvoiceApi.Authentication` blocks if present there. Note: these secret
-columns are **plaintext today** — encrypting them at rest is a separate,
-not-yet-scheduled follow-up.
+`InvoiceApi.Authentication` blocks if present there.
+
+> [!WARNING]
+> These secret columns are **plaintext today** — encrypting them at rest is
+> a separate, not-yet-scheduled follow-up.
 
 ### 7.5 Run the pipeline directly
 ```bash
@@ -560,8 +644,8 @@ python scripts/process_invoices.py --interface-id 1
 ```
 Runs the flow in §1: loads that interface's config, authenticates, syncs new
 payment files + invoice numbers from the upstream API (`sync_payment_files()`
-— Get Payment Batches → `ap_payment_file_details`/`ap_batch_details`, Get
-Invoice List → `ap_invoices`/`ap_batch_invoice_details` + its child tables),
+— Get Payment Batches → `ap_payment_file_details`, Get Invoice List →
+`ap_invoices`/`ap_batch_invoice_details` + its child tables),
 finds every `'New'` payment file for that interface (including any just
 synced), and for each one — pulls its invoices, creates a process-log/UUID,
 processes every invoice (Get Invoice API → `invoice_response_log` →
@@ -601,7 +685,12 @@ python scripts/export_invoices_csv.py
 entire `invoice_summary` table's history — e.g. after manually editing
 `Output.Tables`, or for ad hoc reporting.
 
+---
+
 ## 8. Technical Notes
+
+<details>
+<summary><strong>Click to expand — implementation details, edge cases, and known gaps</strong></summary>
 
 - **Config resolution order**: `interfaceconfiguration` (DB, per `--interface-id`)
   overlays `config/appsettings.yml` (fallback defaults) — see §4. MySQL
@@ -618,12 +707,34 @@ entire `invoice_summary` table's history — e.g. after manually editing
   a `FileHandler` (one fresh timestamped file per run) and a `StreamHandler`
   (console). Every module logs via `logging.getLogger(__name__)`.
   `mysql.connector`/`urllib3` noise is capped at `WARNING`. `process_invoices.py`
-  logs every phase at `INFO` (bracketed `=== ... ===` lines for run/payment-file
-  start and end, step-numbered lines matching §1), so scanning the log file
-  tells you exactly which payment file and which step failed; `repository.py`
-  additionally logs a `DEBUG`-level trace of every DB read/write (row counts,
-  the generated `invoice_process_uuid`, status transitions) — set
-  `Logging.Level: DEBUG` to see those.
+  and `sync_payment_files.py` log every phase at `INFO` (bracketed `=== ... ===`
+  lines for run/payment-file start and end, step-numbered lines matching §1),
+  so scanning the log file tells you exactly which payment file and which
+  step failed. Below that, at `DEBUG` (set `Logging.Level: DEBUG` to see
+  these):
+  - **`repository.py`** — every DB write function logs a one-line
+    `"<function_name>: success (<key id>=<value>)"` confirmation (e.g.
+    `insert_batch_invoice_detail: success (id=42)`), covering every table in
+    the pipeline (`ap_payment_file_details`, `ap_invoices`,
+    `ap_batch_invoice_details` + its two child tables,
+    `invoice_response_log`, `invoice_summary`/`detail`/`line_detail`/
+    `service`/`charge`). There's no separate `"failed"` log at this layer —
+    an exception here propagates immediately to `process_invoice()` /
+    `process_payment_file()` / `main()`, which already log the failure with
+    fuller context (invoice number, batch name, full traceback via
+    `logger.exception`), so a second log at the point of failure would just
+    duplicate that.
+  - **`invoice_client.py`** — `get_payment_batches()` and `get_invoice_list()`
+    log the URL before each call and the HTTP status code after (matching
+    `auth_client.py`'s existing pattern). `get_invoice()` doesn't log
+    internally since `process_invoices.py::process_invoice()` already logs
+    around every call to it at `INFO`.
+  - **`sync_payment_files.py::_fetch_all_pages()`** — logs each page as
+    `"<API label>: page N -- in process"`, then either
+    `"page N -- success (X record(s), N/total pages)"` or
+    `"page N -- failed (<message>)"`, so a pagination failure names exactly
+    which page and API it happened on instead of surfacing only as a bare
+    traceback.
 - **Failure handling order**: wherever a batch fails, the original exception
   is always logged (`logger.exception`, full traceback) *before* any cleanup
   is attempted, and every cleanup step (`conn.rollback()`, the `Failure`
@@ -647,27 +758,85 @@ entire `invoice_summary` table's history — e.g. after manually editing
   ISO 8601 date strings via regex and converts them to naive `datetime`
   objects before insert (MySQL `DATETIME` columns reject the API's `Z`/offset
   suffix outright).
-- **Payment-file sync window / pagination / dedupe** (`sync_payment_files.py`):
-  the Get Payment Batches pull is windowed to `[today - LookbackDays, today]`
-  (UTC, `GetPaymentBatches.LookbackDays` in `appsettings.yml`, default `1`) —
-  widen it if a run could be delayed long enough to miss a batch created near
-  the boundary. Both new APIs are paginated via `data.totalPages`, not just a
-  single page like `get_invoice`. Dedup is by upstream id, not content: a
-  `paymentFileId` already present in `ap_payment_file_details` for that
-  interface is skipped entirely (its invoice list isn't re-pulled), and within
-  a newly-pulled batch, only `invoiceNumber`s not already in `ap_invoices` for
-  that payment file are inserted — but the raw-capture tables
-  (`ap_batch_details`, `ap_batch_invoice_details` + its child tables) are only
-  ever written once, at the same time as the first insert, so they can't
-  accumulate duplicates either. There's currently no filter on
-  `apPaymentFileStatus` — every batch the API returns in the date window is
-  pulled in, regardless of its upstream status.
-- **Not yet wired up**: `interfaceconfiguration.Platform_DB_*` /
-  `Platform_DB_AP_Query` (a connection + templated query against a separate
-  external database) both exist in the schema but aren't read by any script
-  yet — they weren't part of the payment-file-scoped flow this README
-  describes. Encrypting `interfaceconfiguration`'s plaintext secret columns is
-  also not yet implemented.
+- **Payment-file sync window / pagination / no dedup, by design**
+  (`sync_payment_files.py`): the Get Payment Batches pull is windowed to
+  `[today - LookbackDays, today]` (UTC, `GetPaymentBatches.LookbackDays` in
+  `appsettings.yml`, default `1`) — widen it if a run could be delayed long
+  enough to miss a batch created near the boundary. Both new APIs are
+  paginated via `data.totalPages`, not just a single page like `get_invoice`.
+  **There is no existence check anywhere in this function** — every batch the
+  API returns in the window gets a brand-new `ap_payment_file_details` row
+  every run, even one whose `paymentFileId` was already synced on a prior
+  run, and everything downstream (`ap_batch_invoice_details` +
+  `allocationValues[]`/`custom[]` children, `ap_invoices` rows) is written
+  unconditionally under that fresh id. This is deliberate, not an oversight:
+  a payment file's invoice list can grow or shrink on the vendor's side
+  between checks, and reprocessing the whole chain from a fresh id is simpler
+  than diffing an existing one. The practical consequence: since
+  `LookbackDays` deliberately overlaps day to day, **every batch gets fully
+  reprocessed at least twice** — new Get Invoice calls for every invoice in
+  it, a new CSV, a new SFTP upload, a new email — once on the run where it
+  first appears and again on the next run where the window still covers it.
+  Reprocessing is naturally bounded by the window itself: once a batch's
+  `apCreatedDate` ages past `[today - LookbackDays, today]`, the API stops
+  returning it and it stops being reprocessed. (An earlier version deduped by
+  `paymentFileId` — skipping a batch entirely once seen — and separately
+  deduped invoice numbers within a batch; both were removed once it became
+  clear a batch's invoice list isn't append-only, so skipping it forever
+  after the first sync would silently miss later additions or removals.)
+  There's currently no filter on `apPaymentFileStatus` — every batch the API
+  returns in the date window is pulled in, regardless of its upstream status.
+- **`ap_batch_details` merged into `ap_payment_file_details`** (2026-09-12):
+  `ap_batch_details` was a 1:1 shadow table — one row per
+  `ap_payment_file_details` row, inserted in the same transaction, never
+  queried independently (confirmed via full-repo search, including
+  `tracker/`). Splitting them bought nothing once payment-file rows started
+  coming from the API instead of manual UI entry, so its 11 columns
+  (`client`, `ap_created_date`, `ap_payment_file_status`, `no_of_invoices`,
+  `no_of_vendors`, `earliest_due_date`, `currency`, `invoice_amount`,
+  `allocated_amount`, `detail_invoice_amount`, `fetched_datetime`) now live
+  directly on `ap_payment_file_details`; its `id`, `ap_payment_file_detail_id`,
+  `payment_file_id`, and `ap_batch_name` columns were dropped as redundant
+  with the parent row's own `id` / `ap_batch_payment_file_id` / `ap_batch_name`.
+  `repository.py::insert_payment_file()` now takes the raw API `record` as a
+  fifth argument and writes both the tracking columns and the API metadata in
+  one `INSERT`; `insert_batch_details()` no longer exists. See
+  [`sql/migrate_merge_ap_batch_details.sql`](sql/migrate_merge_ap_batch_details.sql)
+  for the migration (backfill step included, commented out, for anyone
+  upgrading a database where `ap_batch_details` already has rows — this
+  repo's own dev DB had none).
+- **`ap_invoices_process_log` merged into `ap_payment_file_details`**
+  (2026-09-12): unlike `ap_batch_details`, this table was genuinely
+  one-to-many — `process_payment_file()` calls `create_process_log()` on
+  every run, so a batch reprocessed after a `Failure` (flipped back to
+  `'New'`, per §6) would accumulate a *second* row, with
+  `ap_payment_file_details.log_id` only ever pointing at the latest one. It
+  was also the backing table for a whole tracker feature (a "Run Logs"
+  list/detail page, and the "runs" history on each batch's detail page). In
+  practice a batch is only ever processed by one active run at a time, so it
+  was merged in anyway: `ap_payment_file_details` gained an
+  `invoice_process_uuid` column holding the *current* run's UUID
+  (`repository.py::start_batch_run()`, replacing `create_process_log()`,
+  writes it directly instead of inserting a log row), `log_id` was dropped,
+  and `update_payment_file_status()` no longer takes a `log_id` argument. The
+  trade-off this accepts: a batch's run history before its most recent run is
+  no longer queryable. The tracker's "Run Logs" nav item, list page, detail
+  page, and the "Runs" tab on the batch detail page were removed to match (its
+  "Response Logs" tab now filters by the batch's own `invoice_process_uuid`
+  directly instead of collecting UUIDs across multiple run rows) — see
+  `tracker/README.md`. See
+  [`sql/migrate_merge_ap_invoices_process_log.sql`](sql/migrate_merge_ap_invoices_process_log.sql)
+  for the migration (this repo's own dev DB had one real row, backfilled onto
+  its batch before the table was dropped).
+
+> [!NOTE]
+> **Not yet wired up**: `interfaceconfiguration.Platform_DB_*` /
+> `Platform_DB_AP_Query` (a connection + templated query against a separate
+> external database) both exist in the schema but aren't read by any script
+> yet — they weren't part of the payment-file-scoped flow this README
+> describes. Encrypting `interfaceconfiguration`'s plaintext secret columns is
+> also not yet implemented.
+
 - **Legacy tables retired**: `aprequestpaymentdetails` (`request_detail_id`,
   `request_id`, `payment_flie_id`, `ap_batch_name`) predated the Get Payment
   Batches API integration, had no `interface_id` column, and its payment-file
@@ -682,9 +851,13 @@ entire `invoice_summary` table's history — e.g. after manually editing
   [`sql/drop_aprequestpaymentdetails.sql`](sql/drop_aprequestpaymentdetails.sql);
   `aprequestdetails` can be dropped the same way via
   [`sql/drop_aprequestdetails.sql`](sql/drop_aprequestdetails.sql).
-- **Other potential data-shape risks (not yet hit, flagged for awareness)**:
-  freeform text fields such as `reason`, `address`, `billing_street_address`,
-  and `remit_street_address` are `VARCHAR(200)`–`VARCHAR(500)` in the DDL; if
-  the live API ever returns longer values, MySQL will raise `Error 1406: Data
-  too long for column`. Fix is a one-line `ALTER TABLE ... MODIFY COLUMN ...
-  TEXT` for the affected column(s).
+
+> [!WARNING]
+> **Other potential data-shape risks (not yet hit, flagged for awareness)**:
+> freeform text fields such as `reason`, `address`, `billing_street_address`,
+> and `remit_street_address` are `VARCHAR(200)`–`VARCHAR(500)` in the DDL; if
+> the live API ever returns longer values, MySQL will raise `Error 1406: Data
+> too long for column`. Fix is a one-line `ALTER TABLE ... MODIFY COLUMN ...
+> TEXT` for the affected column(s).
+
+</details>

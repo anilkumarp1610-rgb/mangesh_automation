@@ -11,16 +11,22 @@ and **monitor** the AP-invoice processing system.
 |---|------------|-----------------|
 | 1 | Manage **Interface configurations** (create / edit / activate) | `interfaceconfiguration` |
 | 2 | Create **AP batches** + attach **invoice numbers** (pipeline inputs) | `ap_payment_file_details`, `ap_invoices` |
-| 3 | Monitor **batches → runs → API calls → stored invoice data** | `ap_invoices_process_log`, `invoice_response_log`, `ap_invoices`, `invoice_summary`, `invoice_detail`, `invoice_line_detail`, `invoice_service`, `invoice_charge` |
+| 3 | Monitor **batches → API calls → stored invoice data** | `invoice_response_log`, `ap_invoices`, `invoice_summary`, `invoice_detail`, `invoice_line_detail`, `invoice_service`, `invoice_charge` |
 | 4 | **Trigger** the pipeline for an interface (Airflow REST API) | — |
+
+> [!NOTE]
+> **Updated 2026-09-12**: `ap_invoices_process_log` was merged into
+> `ap_payment_file_details` (a single `invoice_process_uuid` column on the
+> batch row, since a batch is only ever processed by one run at a time) — the
+> "runs" concept and the P2 "Run Logs" feature described below were retired
+> alongside it. The row/diagram above reflect the current shape; see
+> `tracker/README.md` for details.
 
 ### Data model (as it exists today)
 
 ```
-interfaceconfiguration ─< ap_payment_file_details ─< ap_invoices        (inputs + last API status/response)
-                                   │
-                                   ├─< ap_invoices_process_log          (1 row per run — invoice_process_uuid)
-                                   │
+interfaceconfiguration ─< ap_payment_file_details ─< ap_invoices        (inputs + last API status/response;
+                                   │                                     invoice_process_uuid on the batch row)
                          invoice_response_log                           (1 row per API call: url, http code, JSON body, error)
                                    │
                          invoice_summary ─ invoice_detail ─< invoice_line_detail ─< invoice_service ─< invoice_charge

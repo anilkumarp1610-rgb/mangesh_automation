@@ -4,10 +4,7 @@ from datetime import datetime, timedelta, timezone
 from config import AppConfig
 from invoice_client import get_invoice_list, get_payment_batches
 from repository import (
-    get_existing_payment_file_ids,
-    get_invoice_numbers_for_payment_file,
     insert_ap_invoice,
-    insert_batch_details,
     insert_batch_invoice_allocation_value,
     insert_batch_invoice_custom,
     insert_batch_invoice_detail,
@@ -23,17 +20,27 @@ def _fetch_all_pages(call, api_label: str) -> list:
     records = []
     page = 1
     while True:
+        logger.debug("%s: page %s -- in process", api_label, page)
         response = call(page)
         response.raise_for_status()
         payload = response.json()
         if not payload.get("success"):
+            logger.error("%s: page %s -- failed (%s)", api_label, page, payload.get("message"))
             raise RuntimeError(f"{api_label} failed: {payload.get('message')}")
 
         data = payload.get("data") or {}
         page_records = data.get("records") or []
         records.extend(page_records)
-
         total_pages = data.get("totalPages") or 1
+        logger.debug(
+            "%s: page %s -- success (%d record(s), %s/%s pages)",
+            api_label,
+            page,
+            len(page_records),
+            page,
+            total_pages,
+        )
+
         if page >= total_pages or not page_records:
             break
         page += 1
@@ -42,10 +49,23 @@ def _fetch_all_pages(call, api_label: str) -> list:
 
 
 def sync_payment_files(cursor, cfg: AppConfig, token: str, interface_id: int) -> list:
-    """Step 1: pull payment-file batches from the upstream API and insert the
-    new ones into ap_payment_file_details. Step 2 for each new batch: pull its
-    invoice list from the upstream API and insert the invoice numbers into
-    ap_invoices. Returns the ap_payment_file_details.id values just inserted."""
+    """Step 1: pull every payment-file batch the upstream API returns for the
+    configured date window and insert a fresh ap_payment_file_details row for
+    EACH one, every run -- no existence check against a prior run's row. A
+    paymentFileId that reappears (which it will, at least once, since
+    GetPaymentBatches.LookbackDays deliberately overlaps day to day) gets a
+    brand-new id and is fully reprocessed from scratch: new invoice list pull,
+    new ap_invoices rows, new Get Invoice calls, new CSV/SFTP/email. This is a
+    deliberate choice -- a payment file's invoice list can grow or shrink on
+    the vendor's side, and re-running the whole chain from a fresh id is
+    simpler and safer than trying to diff and patch an existing one. Cost is
+    naturally bounded by the date window itself: once a payment file ages out
+    of [today - LookbackDays, today], the API stops returning it and it stops
+    being reprocessed.
+
+    Step 2 for every batch: pull its invoice list from the upstream API and
+    insert the invoice numbers into ap_invoices. Returns the
+    ap_payment_file_details.id values inserted this run."""
     batches_cfg = cfg.invoice_api.get_payment_batches
     to_date = datetime.now(timezone.utc).date()
     from_date = to_date - timedelta(days=batches_cfg.lookback_days)
@@ -64,24 +84,14 @@ def sync_payment_files(cursor, cfg: AppConfig, token: str, interface_id: int) ->
     )
     logger.info("Payment file sync: %d payment batch record(s) returned", len(batch_records))
 
-    existing_payment_file_ids = get_existing_payment_file_ids(cursor, interface_id)
     new_payment_file_detail_ids = []
 
     for record in batch_records:
         payment_file_id = record.get("paymentFileId")
-        if payment_file_id in existing_payment_file_ids:
-            logger.debug(
-                "Payment file sync: paymentFileId=%s already exists for InterfaceId=%s -- skipping",
-                payment_file_id,
-                interface_id,
-            )
-            continue
-
         batch_name = record.get("apBatchName") or str(payment_file_id)
         payment_file_detail_id = insert_payment_file(
-            cursor, interface_id, payment_file_id, batch_name
+            cursor, interface_id, payment_file_id, batch_name, record
         )
-        existing_payment_file_ids.add(payment_file_id)
         new_payment_file_detail_ids.append(payment_file_detail_id)
         logger.info(
             "Payment file sync: inserted %s (paymentFileId=%s) as ap_payment_file_details.id=%s",
@@ -89,7 +99,6 @@ def sync_payment_files(cursor, cfg: AppConfig, token: str, interface_id: int) ->
             payment_file_id,
             payment_file_detail_id,
         )
-        insert_batch_details(cursor, payment_file_detail_id, record)
 
         logger.info(
             "Payment file sync: pulling invoice list for %s (paymentFileId=%s)",
@@ -99,6 +108,11 @@ def sync_payment_files(cursor, cfg: AppConfig, token: str, interface_id: int) ->
         detail_records = _fetch_all_pages(
             lambda page: get_invoice_list(cfg.invoice_api, token, payment_file_id, page),
             "Get Invoice List API",
+        )
+        logger.info(
+            "Payment file sync: %d invoice-list record(s) returned for %s",
+            len(detail_records),
+            batch_name,
         )
 
         invoice_numbers = set()
@@ -119,18 +133,17 @@ def sync_payment_files(cursor, cfg: AppConfig, token: str, interface_id: int) ->
                 if invoice_number:
                     invoice_numbers.add(invoice_number)
 
-        already_stored = set(
-            get_invoice_numbers_for_payment_file(cursor, payment_file_detail_id)
-        )
-        new_invoice_numbers = sorted(invoice_numbers - already_stored)
-
-        for invoice_number in new_invoice_numbers:
+        # No need to check ap_invoices for already-stored invoice numbers here:
+        # payment_file_detail_id is always a brand-new AUTO_INCREMENT id (see
+        # docstring -- every batch gets a fresh row every run), so no
+        # ap_invoices row could possibly reference it yet. invoice_numbers is
+        # already deduplicated within this run via the set() built above.
+        for invoice_number in sorted(invoice_numbers):
             insert_ap_invoice(cursor, payment_file_detail_id, invoice_number)
         logger.info(
-            "Payment file sync: stored %d new invoice number(s) for %s (%d already present)",
-            len(new_invoice_numbers),
+            "Payment file sync: stored %d invoice number(s) for %s",
+            len(invoice_numbers),
             batch_name,
-            len(invoice_numbers) - len(new_invoice_numbers),
         )
 
     return new_payment_file_detail_ids

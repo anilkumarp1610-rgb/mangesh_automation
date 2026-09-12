@@ -1,6 +1,6 @@
 /**
  * Development seed: creates a small but complete dataset so every read screen in
- * the tracker has something to show — AP batches, process/response logs, and the
+ * the tracker has something to show — AP batches, response logs, and the
  * full invoice_summary -> detail -> line -> service -> charge tree.
  *
  * Safe to re-run: it only seeds tables that are empty (except ap_invoices, which
@@ -109,15 +109,14 @@ async function seed(): Promise<void> {
       ]);
     }
 
-    // --- process logs + response logs + invoice tree for the first (Success) batch ---
-    if ((await count('ap_invoices_process_log')) === 0) {
+    // --- response logs + invoice tree for the first (Success) batch ---
+    if ((await count('invoice_summary')) === 0) {
       const successBatch = batches.find((b) => b.ap_batch_status === 'Success') ?? batches[0]!;
       const uuid = randomUUID();
-      await conn.query(
-        `INSERT INTO ap_invoices_process_log (proces_datetime, invoice_process_uuid, ap_payment_file_detail_id)
-         VALUES (?, ?, ?)`,
-        [new Date(), uuid, successBatch.id],
-      );
+      await conn.query('UPDATE ap_payment_file_details SET invoice_process_uuid = ? WHERE id = ?', [
+        uuid,
+        successBatch.id,
+      ]);
 
       const [batchInvoices] = await conn.query<import('mysql2').RowDataPacket[]>(
         'SELECT ap_invoice_number FROM ap_invoices WHERE ap_paymentfile_id = ?',
@@ -207,7 +206,7 @@ async function seed(): Promise<void> {
           }
         }
       }
-      logger.info('seeded process log + response logs + invoice tree');
+      logger.info('seeded response logs + invoice tree');
     }
 
     await conn.commit();
