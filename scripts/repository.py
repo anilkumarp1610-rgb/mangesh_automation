@@ -7,6 +7,10 @@ from datetime import datetime, timezone
 from mysql.connector.cursor import MySQLCursor
 
 from field_maps import (
+    BATCH_DETAILS_FIELD_MAP,
+    BATCH_INVOICE_ALLOCATION_VALUE_FIELD_MAP,
+    BATCH_INVOICE_CUSTOM_FIELD_MAP,
+    BATCH_INVOICE_DETAIL_FIELD_MAP,
     CHARGE_FIELD_MAP,
     DETAIL_FIELD_MAP,
     SERVICE_FIELD_MAP,
@@ -154,6 +158,92 @@ def get_open_payment_files(cursor: MySQLCursor, interface_id: int) -> list:
         interface_id,
     )
     return rows
+
+
+def get_existing_payment_file_ids(cursor: MySQLCursor, interface_id: int) -> set:
+    cursor.execute(
+        """
+        SELECT ap_batch_payment_file_id
+        FROM ap_payment_file_details
+        WHERE interface_id = %s AND ap_batch_payment_file_id IS NOT NULL
+        """,
+        (interface_id,),
+    )
+    rows = cursor.fetchall()
+    ids = {
+        row["ap_batch_payment_file_id"] if isinstance(row, dict) else row[0]
+        for row in rows
+    }
+    logger.debug(
+        "ap_payment_file_details: %d existing ap_batch_payment_file_id(s) for interface_id=%s",
+        len(ids),
+        interface_id,
+    )
+    return ids
+
+
+def insert_payment_file(
+    cursor: MySQLCursor, interface_id: int, payment_file_id, batch_name: str
+) -> int:
+    data = {
+        "ap_batch_name": batch_name,
+        "ap_batch_payment_file_id": payment_file_id,
+        "interface_id": interface_id,
+        "ap_batch_status": "New",
+    }
+    payment_file_detail_id = insert(cursor, "ap_payment_file_details", data)
+    logger.debug(
+        "ap_payment_file_details: inserted id=%s for paymentFileId=%s (interface_id=%s)",
+        payment_file_detail_id,
+        payment_file_id,
+        interface_id,
+    )
+    return payment_file_detail_id
+
+
+def insert_ap_invoice(cursor: MySQLCursor, payment_file_detail_id: int, invoice_number: str) -> int:
+    data = {
+        "ap_invoice_number": invoice_number,
+        "ap_paymentfile_id": payment_file_detail_id,
+    }
+    return insert(cursor, "ap_invoices", data)
+
+
+def insert_batch_details(cursor: MySQLCursor, payment_file_detail_id: int, record: dict) -> int:
+    """Persist the raw Get Payment Batches API record for this payment file
+    (one row per ap_payment_file_details row) into ap_batch_details."""
+    data = map_record(record, BATCH_DETAILS_FIELD_MAP)
+    data["ap_payment_file_detail_id"] = payment_file_detail_id
+    return insert(cursor, "ap_batch_details", data)
+
+
+def insert_batch_invoice_detail(
+    cursor: MySQLCursor, payment_file_detail_id: int, batch_name: str, detail_record: dict
+) -> int:
+    """Persist one invoiceAPBatchDetails[] entry from the Get Invoice List API
+    response into ap_batch_invoice_details (flat fields only -- its nested
+    allocationValues[]/custom[] arrays are stored as child rows, see
+    insert_batch_invoice_allocation_value / insert_batch_invoice_custom)."""
+    data = map_record(detail_record, BATCH_INVOICE_DETAIL_FIELD_MAP)
+    data["ap_payment_file_detail_id"] = payment_file_detail_id
+    data["ap_batch_name"] = batch_name
+    return insert(cursor, "ap_batch_invoice_details", data)
+
+
+def insert_batch_invoice_allocation_value(
+    cursor: MySQLCursor, batch_invoice_detail_id: int, allocation_record: dict
+) -> int:
+    data = map_record(allocation_record, BATCH_INVOICE_ALLOCATION_VALUE_FIELD_MAP)
+    data["batch_invoice_detail_id"] = batch_invoice_detail_id
+    return insert(cursor, "ap_batch_invoice_allocation_values", data)
+
+
+def insert_batch_invoice_custom(
+    cursor: MySQLCursor, batch_invoice_detail_id: int, custom_record: dict
+) -> int:
+    data = map_record(custom_record, BATCH_INVOICE_CUSTOM_FIELD_MAP)
+    data["batch_invoice_detail_id"] = batch_invoice_detail_id
+    return insert(cursor, "ap_batch_invoice_custom", data)
 
 
 def get_invoice_numbers_for_payment_file(cursor: MySQLCursor, payment_file_detail_id: int) -> list:

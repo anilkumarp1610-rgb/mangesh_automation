@@ -20,6 +20,20 @@ InvoiceApi:
     PageSize: 50
     Expand: true
 
+  # Pulls new AP payment-file batches (Step 1 of the sync). LookbackDays widens
+  # the fromDate/toDate window so a batch created near a run boundary isn't missed.
+  GetPaymentBatches:
+    Endpoint: /invoices/invoiceAPBatches
+    PageSize: 50
+    LookbackDays: 1
+
+  # Pulls the invoice numbers under one payment-file batch (Step 3 of the sync),
+  # keyed by the upstream paymentFileId returned from GetPaymentBatches.
+  GetInvoiceList:
+    Endpoint: /invoices/invoiceAPBatchesDetails
+    PageSize: 50
+    Expand: false
+
 Output:
   Folder: output
   FileName: invoices_export.csv

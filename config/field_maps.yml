@@ -116,3 +116,88 @@ Charge:
   usageUnit1Value: usage_unit1_value
   usageUnit2Label: usage_unit2_label
   usageUnit2Value: usage_unit2_value
+
+BatchDetails:
+  client: client
+  paymentFileId: payment_file_id
+  apCreatedDate: ap_created_date
+  apBatchName: ap_batch_name
+  apPaymentFileStatus: ap_payment_file_status
+  noOfInvoices: no_of_invoices
+  noOfVendors: no_of_vendors
+  earliestDueDate: earliest_due_date
+  currency: currency
+  invoiceAmount: invoice_amount
+  allocatedAmount: allocated_amount
+  detailInvoiceAmount: detail_invoice_amount
+
+BatchInvoiceDetails:
+  client: client
+  organization: organization
+  accountNumber: account_number
+  vendor: vendor
+  accountHiererchy: account_hierarchy  # typo preserved from source API field name
+  phaseDetail: phase_detail
+  invoiceCycle: invoice_cycle
+  invoiceType: invoice_type
+  invoiceProcessingType: invoice_processing_type
+  invoiceSource: invoice_source
+  paymentTerm: payment_term
+  paymentMode: payment_mode
+  payGroup: pay_group
+  profitCenter: profit_center
+  companyCode: company_code
+  billingAddress: billing_address
+  accountOwner: account_owner
+  invoiceNumber: invoice_number
+  invoiceId: invoice_id
+  invoiceStatus: invoice_status
+  invoiceDate: invoice_date
+  billingPeriodFrom: billing_period_from
+  billingPeriodTo: billing_period_to
+  invoiceMonthYear: invoice_month_year
+  paymentDueDate: payment_due_date
+  totalAmountDue: total_amount_due
+  pastDueBalance: past_due_balance
+  totalCurrentCharges: total_current_charges
+  subAccountNumber: sub_account_number
+  wTNorCircuitID: wtn_or_circuit_id
+  wTN: wtn
+  circuitNumber: circuit_number
+  invoiceAmount: invoice_amount
+  salesTaxAmount: sales_tax_amount
+  distributionLine: distribution_line
+  isDeleted: is_deleted
+  postingDate: posting_date
+  vendorCode: vendor_code
+  vendorRemitAddressId: vendor_remit_address_id
+  remitAddress: remit_address
+
+# invoiceAPBatchDetails[].allocationValues[] -- child rows of ap_batch_invoice_details
+BatchInvoiceAllocationValue:
+  allocation1: allocation1
+  allocation2: allocation2
+  allocation3: allocation3
+  allocation4: allocation4
+  allocation5: allocation5
+  allocation6: allocation6
+  allocation7: allocation7
+  allocation8: allocation8
+  allocation9: allocation9
+  allocation10: allocation10
+  allocation11: allocation11
+  allocation12: allocation12
+  allocatedCharges: allocated_charges
+
+# invoiceAPBatchDetails[].custom[] -- child rows of ap_batch_invoice_details
+BatchInvoiceCustom:
+  accountCustom1: account_custom1
+  accountCustom2: account_custom2
+  accountCustom3: account_custom3
+  accountCustom4: account_custom4
+  accountCustom5: account_custom5
+  accountCustom6: account_custom6
+  accountCustom7: account_custom7
+  accountCustom8: account_custom8
+  accountCustom9: account_custom9
+  accountCustom10: account_custom10

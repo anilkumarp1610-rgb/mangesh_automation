@@ -20,6 +20,7 @@ from repository import (
     update_ap_invoice_status,
     update_payment_file_status,
 )
+from sync_payment_files import sync_payment_files
 
 logger = logging.getLogger(__name__)
 
@@ -275,6 +276,19 @@ def main(interface_id: int | None = None) -> None:
             logger.info("Authenticating against %s", cfg.invoice_api.base_uri)
             token = authenticate(cfg.invoice_api)
             logger.info("Authentication successful")
+
+            logger.info(
+                "Step 2a: pulling new payment files + invoice numbers from upstream API "
+                "for InterfaceId=%s",
+                interface_id,
+            )
+            new_payment_file_detail_ids = sync_payment_files(cursor, cfg, token, interface_id)
+            conn.commit()
+            logger.info(
+                "Step 2a: synced %d new payment file(s) for InterfaceId=%s",
+                len(new_payment_file_detail_ids),
+                interface_id,
+            )
 
             logger.info("Step 3: querying open ('New') payment files for InterfaceId=%s", interface_id)
             payment_files = get_open_payment_files(cursor, interface_id)

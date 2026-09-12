@@ -39,10 +39,26 @@ class GetInvoiceConfig:
 
 
 @dataclass
+class GetPaymentBatchesConfig:
+    endpoint: str
+    page_size: int
+    lookback_days: int
+
+
+@dataclass
+class GetInvoiceListConfig:
+    endpoint: str
+    page_size: int
+    expand: bool
+
+
+@dataclass
 class InvoiceApiConfig:
     base_uri: str
     authentication: AuthenticationConfig
     get_invoice: GetInvoiceConfig
+    get_payment_batches: GetPaymentBatchesConfig
+    get_invoice_list: GetInvoiceListConfig
 
 
 @dataclass
@@ -155,6 +171,8 @@ def load_config(path: str = APPSETTINGS_PATH, interface_values: dict | None = No
     api_raw = raw["InvoiceApi"]
     auth_raw = api_raw["Authentication"]
     get_invoice_raw = api_raw["GetInvoice"]
+    get_payment_batches_raw = api_raw.get("GetPaymentBatches", {})
+    get_invoice_list_raw = api_raw.get("GetInvoiceList", {})
     output_raw = raw["Output"]
     # Not hardcoded to one interface: repository.py::load_interface_configuration
     # overlays interfaceconfiguration.InterfaceName onto Job.OutputPrefix, so this
@@ -192,6 +210,16 @@ def load_config(path: str = APPSETTINGS_PATH, interface_values: dict | None = No
                 invoice_status=get_invoice_raw.get("InvoiceStatus", "Approved"),
                 page_size=get_invoice_raw.get("PageSize", 50),
                 expand=get_invoice_raw.get("Expand", True),
+            ),
+            get_payment_batches=GetPaymentBatchesConfig(
+                endpoint=get_payment_batches_raw.get("Endpoint", "/invoices/invoiceAPBatches"),
+                page_size=get_payment_batches_raw.get("PageSize", 50),
+                lookback_days=get_payment_batches_raw.get("LookbackDays", 1),
+            ),
+            get_invoice_list=GetInvoiceListConfig(
+                endpoint=get_invoice_list_raw.get("Endpoint", "/invoices/invoiceAPBatchesDetails"),
+                page_size=get_invoice_list_raw.get("PageSize", 50),
+                expand=get_invoice_list_raw.get("Expand", False),
             ),
         ),
         output=OutputConfig(

@@ -14,6 +14,10 @@ SUMMARY_FIELD_MAP = _raw["Summary"]
 DETAIL_FIELD_MAP = _raw["Detail"]
 SERVICE_FIELD_MAP = _raw["Service"]
 CHARGE_FIELD_MAP = _raw["Charge"]
+BATCH_DETAILS_FIELD_MAP = _raw["BatchDetails"]
+BATCH_INVOICE_DETAIL_FIELD_MAP = _raw["BatchInvoiceDetails"]
+BATCH_INVOICE_ALLOCATION_VALUE_FIELD_MAP = _raw["BatchInvoiceAllocationValue"]
+BATCH_INVOICE_CUSTOM_FIELD_MAP = _raw["BatchInvoiceCustom"]
 
 # API dates come back as ISO 8601, e.g. "2026-05-07T00:00:00Z" or
 # "2026-08-25T09:28:01.099Z" -- MySQL DATETIME columns reject that format

@@ -24,7 +24,8 @@ Indentation = call nesting. `× files` / `× invoices` = runs once per loop item
 | 5 | `load_interface_configuration()` (repository) | `main` | Read `interfaceconfiguration` row → dict of dotted overlay keys |
 | 6 | `load_config(interface_values=…)` (config) | `main` | Rebuild `AppConfig` with DB row overlaid on YAML |
 | 7 | `authenticate()` (auth_client) | `main` | POST Authenticate API → bearer `token` |
-| 8 | `get_open_payment_files()` (repository) | `main` | `SELECT` `ap_payment_file_details` rows with status `New` |
+| 7.1 | `sync_payment_files()` (sync_payment_files) | `main` | Pull new payment-file batches + invoice numbers from the upstream API (see §1a) |
+| 8 | `get_open_payment_files()` (repository) | `main` | `SELECT` `ap_payment_file_details` rows with status `New` (includes any just inserted by 7.1) |
 | 9 | `process_payment_file()` (process_invoices) | `main` — **× files** | Run one batch end-to-end (never re-raises) |
 | 9.1 | `create_process_log()` (repository) | `process_payment_file` | `INSERT` `ap_invoices_process_log`; mint run UUID |
 | 9.2 | `get_invoice_numbers_for_payment_file()` (repository) | `process_payment_file` | Distinct `ap_invoice_number`s for this batch |
@@ -52,6 +53,35 @@ Helpers `insert()` / `upsert()` (repository) are the low-level SQL builders
 called by steps 9.1 and 9.3.2–9.3.4. `map_record()` / `_convert_value()`
 (field_maps) are called inside every `upsert_invoice_*` / `insert_invoice_*` to
 translate API camelCase → DB snake_case and coerce ISO-8601 dates.
+
+---
+
+## 1a. Payment-file sync — `scripts/sync_payment_files.py`
+
+Runs once per `main()` invocation, right after authentication and before the
+`ap_payment_file_details`/`New` query, so newly-pulled batches are picked up
+by the same run.
+
+| Function | Inputs | Output | Calls (internal) | External deps | Notes |
+|---|---|---|---|---|---|
+| `sync_payment_files(cursor, cfg, token, interface_id)` | live `cursor`; `cfg: AppConfig`; `token: str`; `interface_id: int` | `list[int]` — `ap_payment_file_details.id` values just inserted | `_fetch_all_pages`, `get_payment_batches`, `get_existing_payment_file_ids`, `insert_payment_file`, `insert_batch_details`, `get_invoice_list`, `insert_batch_invoice_detail`, `insert_batch_invoice_allocation_value`, `insert_batch_invoice_custom`, `get_invoice_numbers_for_payment_file`, `insert_ap_invoice` | — | Date window: `[today - GetPaymentBatches.LookbackDays, today]` (UTC). Skips a batch whose `paymentFileId` already exists for this `interface_id`; for a new batch, skips invoice numbers already stored for it |
+| `_fetch_all_pages(call, api_label)` | `call: int -> requests.Response`; label for error messages | `list[dict]` — every `data.records` across all pages | — | `requests.Response.raise_for_status/json` | Loops `page=1..data.totalPages`; `RuntimeError` if `payload.success` is falsy |
+
+`GET {BaseUri}{GetPaymentBatches.Endpoint}` (`/invoices/invoiceAPBatches`) returns
+`data.records[].{paymentFileId, apBatchName, ...}` → one `ap_payment_file_details`
+row each (`ap_batch_status='New'`), **plus** the full raw record → one
+`ap_batch_details` row each (`insert_batch_details`). `GET
+{BaseUri}{GetInvoiceList.Endpoint}` (`/invoices/invoiceAPBatchesDetails?paymentFileId=...`)
+returns `data.records[].invoiceAPBatchDetails[]` → one `ap_invoices` row per
+distinct `invoiceNumber` not already stored (`insert_ap_invoice`), **plus**
+the full raw `invoiceAPBatchDetails[]` entry (flat fields) → one
+`ap_batch_invoice_details` row each, unconditionally (`insert_batch_invoice_detail`)
+— both keyed to the new `ap_payment_file_details.id` (not the upstream
+`paymentFileId`). Each entry's nested `allocationValues[]` / `custom[]`
+arrays are further normalized into `ap_batch_invoice_allocation_values` /
+`ap_batch_invoice_custom` child rows, keyed to that `ap_batch_invoice_details.id`
+(`insert_batch_invoice_allocation_value`, `insert_batch_invoice_custom`) —
+same nested-table shape as the invoice-detail chain in §1, not JSON blobs.
 
 ---
 
@@ -97,10 +127,20 @@ and exposes `SUMMARY_FIELD_MAP`, `DETAIL_FIELD_MAP`, `SERVICE_FIELD_MAP`,
 |---|---|---|---|---|
 | `authenticate(cfg: InvoiceApiConfig)` | `cfg.authentication` (`client_api_key`, `login_user_name`, `password`), `cfg.base_uri` | `str` — `data.accessToken` | `requests.post` (30s timeout), `logging` | `RuntimeError` if any credential blank; `raise_for_status()`; `RuntimeError` if `success` false or no token |
 | `get_invoice(cfg: InvoiceApiConfig, token, invoice_number)` | `cfg.base_uri`, `cfg.get_invoice` (`endpoint`, `invoice_status`, `page_size`, `expand`); `token: str`; `invoice_number: str` | raw `requests.Response` | `requests.get` (60s timeout) | None raised — caller inspects `.ok` / `.json()` |
+| `get_payment_batches(cfg, token, from_date, to_date, page=1)` | `cfg.get_payment_batches` (`endpoint`, `page_size`); `from_date`/`to_date: str` (`YYYY-MM-DD`); `page: int` | raw `requests.Response` | `requests.get` (60s timeout) | None raised — caller (`_fetch_all_pages`) calls `raise_for_status()`/`.json()` |
+| `get_invoice_list(cfg, token, payment_file_id, page=1)` | `cfg.get_invoice_list` (`endpoint`, `page_size`, `expand`); `payment_file_id`; `page: int` | raw `requests.Response` | `requests.get` (60s timeout) | None raised — caller (`_fetch_all_pages`) calls `raise_for_status()`/`.json()` |
 
 `get_invoice` request: `GET {base_uri}{endpoint}` with query params
 `invoiceStatus, invoiceNumber, page=1, pageSize, sortBy=createdDate,
 sortOrder=desc, expand, export=false` and header `Authorization: Bearer <token>`.
+
+`get_payment_batches` request: `GET {base_uri}{endpoint}` with query params
+`fromDate, toDate, page, pageSize, sortBy=createdDate, sortOrder=desc,
+export=false` and header `Authorization: Bearer <token>`.
+
+`get_invoice_list` request: `GET {base_uri}{endpoint}` with query params
+`paymentFileId, page, pageSize, sortBy=createdDate, sortOrder=desc, expand,
+export=false` and header `Authorization: Bearer <token>`.
 
 ---
 
@@ -112,7 +152,8 @@ sortOrder=desc, expand, export=false` and header `Authorization: Bearer <token>`
 |---|---|---|---|---|
 | `load_interface_configuration(cursor, interface_id)` | `cursor`, `interface_id: int` | `dict` — dotted key → value | `SELECT * FROM interfaceconfiguration WHERE InterfaceId=%s AND IsActive=1` | `ValueError` if no active row; skips `NULL`/empty columns; bools via `bool()`; recipient lists via `_parse_recipient_list` |
 | `get_open_payment_files(cursor, interface_id)` | `cursor`, `interface_id: int` | `list[dict]` — payment-file rows | `SELECT id, ap_batch_name, ap_batch_payment_file_id, interface_id, ap_batch_status FROM ap_payment_file_details WHERE interface_id=%s AND ap_batch_status='New'` | Drives the step-9 loop |
-| `get_invoice_numbers_for_payment_file(cursor, payment_file_detail_id)` | `cursor`, `payment_file_detail_id: int` | `list[str]` | `SELECT DISTINCT ap_invoice_number FROM ap_invoices WHERE ap_paymentfile_id=%s AND ap_invoice_number IS NOT NULL` | Handles dict or tuple rows |
+| `get_invoice_numbers_for_payment_file(cursor, payment_file_detail_id)` | `cursor`, `payment_file_detail_id: int` | `list[str]` | `SELECT DISTINCT ap_invoice_number FROM ap_invoices WHERE ap_paymentfile_id=%s AND ap_invoice_number IS NOT NULL` | Handles dict or tuple rows; also used by `sync_payment_files` to dedupe invoice numbers before insert |
+| `get_existing_payment_file_ids(cursor, interface_id)` | `cursor`, `interface_id: int` | `set` — upstream `paymentFileId` values | `SELECT ap_batch_payment_file_id FROM ap_payment_file_details WHERE interface_id=%s AND ap_batch_payment_file_id IS NOT NULL` | Used by `sync_payment_files` to skip batches already pulled |
 | `_parse_recipient_list(value)` | `str` | `list[str]` | — | JSON array if starts with `[`, else split on `,`/`;` |
 
 ### 5.2 Writes
@@ -129,6 +170,12 @@ sortOrder=desc, expand, export=false` and header `Authorization: Bearer <token>`
 | `insert_invoice_service(cursor, line_detail_id, service_record)` | `line_detail_id: int`, service dict | `int` — `service_pk` | `invoice_service` | `map_record(SERVICE_FIELD_MAP)`, `insert` |
 | `insert_invoice_charge(cursor, service_pk, charge_record)` | `service_pk: int`, charge dict | `int` — row PK | `invoice_charge` | `map_record(CHARGE_FIELD_MAP)`, `insert` |
 | `update_payment_file_status(cursor, payment_file_detail_id, status, log_id)` | `status: str`, `log_id: int` | `None` | `ap_payment_file_details` (`ap_batch_status`, `processed_date=now`, `log_id`) | `datetime` |
+| `insert_payment_file(cursor, interface_id, payment_file_id, batch_name)` | `interface_id: int`; upstream `payment_file_id`; `batch_name: str` | `int` — new `ap_payment_file_details.id` | `ap_payment_file_details` (`ap_batch_status` set to `'New'`) | `insert` |
+| `insert_ap_invoice(cursor, payment_file_detail_id, invoice_number)` | `payment_file_detail_id: int`; `invoice_number: str` | `int` — new `ap_invoice_id` | `ap_invoices` | `insert` |
+| `insert_batch_details(cursor, payment_file_detail_id, record)` | `payment_file_detail_id: int`; raw Get Payment Batches API `record` dict | `int` — new `ap_batch_details.id` | `ap_batch_details` | `map_record(BATCH_DETAILS_FIELD_MAP)`, `insert` |
+| `insert_batch_invoice_detail(cursor, payment_file_detail_id, batch_name, detail_record)` | `payment_file_detail_id: int`; `batch_name: str`; raw `invoiceAPBatchDetails[]` entry (flat fields only) | `int` — new `ap_batch_invoice_details.id` | `ap_batch_invoice_details` | `map_record(BATCH_INVOICE_DETAIL_FIELD_MAP)`, `insert` |
+| `insert_batch_invoice_allocation_value(cursor, batch_invoice_detail_id, allocation_record)` | `batch_invoice_detail_id: int`; one `allocationValues[]` entry | `int` — new row id | `ap_batch_invoice_allocation_values` | `map_record(BATCH_INVOICE_ALLOCATION_VALUE_FIELD_MAP)`, `insert` |
+| `insert_batch_invoice_custom(cursor, batch_invoice_detail_id, custom_record)` | `batch_invoice_detail_id: int`; one `custom[]` entry | `int` — new row id | `ap_batch_invoice_custom` | `map_record(BATCH_INVOICE_CUSTOM_FIELD_MAP)`, `insert` |
 
 ### 5.3 Low-level SQL builders
 
@@ -208,6 +255,8 @@ All three prepend `scripts/` to `sys.path`, import
 | `apache-airflow` (not in `requirements.txt`) | `dags/*.py` only |
 | Invoice API — `POST /api/v2/Authenticate` | `auth_client.authenticate` |
 | Invoice API — `GET /api/v2/invoices` | `invoice_client.get_invoice` |
+| Invoice API — `GET /invoices/invoiceAPBatches` | `invoice_client.get_payment_batches` |
+| Invoice API — `GET /invoices/invoiceAPBatchesDetails` | `invoice_client.get_invoice_list` |
 | SFTP server | `delivery.upload_to_sftp` |
 | SMTP server | `delivery._send_message` |
 
@@ -216,8 +265,12 @@ All three prepend `scripts/` to `sys.path`, import
 | Table | Read by | Written by |
 |---|---|---|
 | `interfaceconfiguration` | `load_interface_configuration` | — |
-| `ap_payment_file_details` | `get_open_payment_files` | `update_payment_file_status` |
-| `ap_invoices` | `get_invoice_numbers_for_payment_file`, `fetch_ap_invoices` | `update_ap_invoice_status` |
+| `ap_payment_file_details` | `get_open_payment_files`, `get_existing_payment_file_ids` | `update_payment_file_status`, `insert_payment_file` |
+| `ap_invoices` | `get_invoice_numbers_for_payment_file`, `fetch_ap_invoices` | `update_ap_invoice_status`, `insert_ap_invoice` |
+| `ap_batch_details` | export/reporting (raw Get Payment Batches record per batch) | `insert_batch_details` |
+| `ap_batch_invoice_details` | export/reporting (raw `invoiceAPBatchDetails[]` flat fields per invoice line) | `insert_batch_invoice_detail` |
+| `ap_batch_invoice_allocation_values` | export/reporting (`allocationValues[]` child rows) | `insert_batch_invoice_allocation_value` |
+| `ap_batch_invoice_custom` | export/reporting (`custom[]` child rows) | `insert_batch_invoice_custom` |
 | `ap_invoices_process_log` | — | `create_process_log` |
 | `invoice_response_log` | export join | `insert_response_log` |
 | `invoice_summary` | export join (base, run-scoped) | `upsert_invoice_summary` |
