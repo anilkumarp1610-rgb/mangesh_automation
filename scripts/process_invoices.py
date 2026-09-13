@@ -2,6 +2,7 @@ import argparse
 import logging
 import os
 import re
+from datetime import date, datetime
 
 from auth_client import authenticate
 from config import load_config
@@ -25,6 +26,13 @@ from sync_payment_files import sync_payment_files
 logger = logging.getLogger(__name__)
 
 _UNSAFE_FILENAME_CHARS = re.compile(r"[^A-Za-z0-9_.-]")
+
+
+def _parse_date_arg(value: str) -> date:
+    try:
+        return datetime.strptime(value, "%Y-%m-%d").date()
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"invalid date {value!r} -- expected YYYY-MM-DD")
 
 
 def process_invoice(
@@ -226,10 +234,19 @@ def process_payment_file(conn, cursor, cfg, token: str, payment_file: dict) -> N
     logger.info("=== Payment file %s: done, marked %s ===", batch_name, batch_status)
 
 
-def main(interface_id: int | None = None) -> None:
+def main(
+    interface_id: int | None = None,
+    from_date: date | None = None,
+    to_date: date | None = None,
+) -> None:
     """Entry point. `interface_id` is required; pass it directly when calling this
     from other Python code (e.g. an Airflow PythonOperator) -- CLI usage instead
-    reads it from --interface-id via argparse."""
+    reads it from --interface-id via argparse.
+
+    from_date/to_date optionally restrict the GetPaymentBatches date window pulled
+    in sync_payment_files (default: the last GetPaymentBatches.LookbackDays day(s)
+    ending today). CLI usage reads these from the optional trailing date argument(s):
+    one date (YYYY-MM-DD) for that single day, or two dates for a from/to range."""
     if interface_id is None:
         parser = argparse.ArgumentParser(description="Process AP invoices for a given interface.")
         parser.add_argument(
@@ -239,7 +256,27 @@ def main(interface_id: int | None = None) -> None:
             dest="interface_id",
             help="interfaceconfiguration.InterfaceId to process",
         )
-        interface_id = parser.parse_args().interface_id
+        parser.add_argument(
+            "dates",
+            nargs="*",
+            type=_parse_date_arg,
+            metavar="DATE",
+            help=(
+                "Optional GetPaymentBatches date filter: a single date (YYYY-MM-DD) to "
+                "process just that day, or two dates (YYYY-MM-DD YYYY-MM-DD) for a range. "
+                "Defaults to the last GetPaymentBatches.LookbackDays day(s) ending today."
+            ),
+        )
+        args = parser.parse_args()
+        interface_id = args.interface_id
+        if len(args.dates) == 1:
+            from_date = to_date = args.dates[0]
+        elif len(args.dates) == 2:
+            from_date, to_date = args.dates
+            if from_date > to_date:
+                parser.error(f"start date {from_date} is after end date {to_date}")
+        elif len(args.dates) > 2:
+            parser.error("expected at most 2 date arguments (a single date or a from/to range)")
 
     try:
         cfg = load_config()
@@ -277,10 +314,13 @@ def main(interface_id: int | None = None) -> None:
 
             logger.info(
                 "Step 2a: pulling new payment files + invoice numbers from upstream API "
-                "for InterfaceId=%s",
+                "for InterfaceId=%s%s",
                 interface_id,
+                f" (date window override: {from_date} to {to_date})" if from_date else "",
             )
-            new_payment_file_detail_ids = sync_payment_files(cursor, cfg, token, interface_id)
+            new_payment_file_detail_ids = sync_payment_files(
+                cursor, cfg, token, interface_id, from_date=from_date, to_date=to_date
+            )
             conn.commit()
             logger.info(
                 "Step 2a: synced %d new payment file(s) for InterfaceId=%s",

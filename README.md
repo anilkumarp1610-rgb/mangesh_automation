@@ -76,12 +76,12 @@ each step are:
 3. **Step 2a — Sync payment files + invoices from upstream**
    (`sync_payment_files.py`) — no dedup, every batch the API returns gets a
    fresh insert every run, even ones already seen (see §8):
-   - `GET {BaseUri}/invoices/invoiceAPBatches` (`fromDate`/`toDate` window) →
+   - `GET {BaseUri}/api/v2/invoices/invoiceAPBatches` (`fromDate`/`toDate` window) →
      every batch inserted as a new `ap_payment_file_details` row — the
      pipeline-owned tracking columns (`ap_batch_status='New'`, `processed_date`,
      `invoice_process_uuid`) alongside the raw API record (`client`,
      `ap_payment_file_status`, amounts, etc.) on the same row.
-   - for each batch: `GET {BaseUri}/invoices/invoiceAPBatchesDetails?paymentFileId=...`
+   - for each batch: `GET {BaseUri}/api/v2/invoices/invoiceAPBatchesDetails?paymentFileId=...`
      → `invoiceAPBatchDetails[].invoiceNumber` inserted into `ap_invoices`;
      each entry is also inserted into `ap_batch_invoice_details`, with its
      nested `allocationValues[]`/`custom[]` inserted into their own child
@@ -208,8 +208,8 @@ already exist, so it won't retroactively add new columns.
 | `scripts/auth_client.py` | `authenticate(cfg)` — calls the Authenticate API, returns the bearer token |
 | `scripts/invoice_client.py` | `get_invoice(cfg, token, invoice_number)` — calls the Get Invoice API; `get_payment_batches(cfg, token, from_date, to_date, page)` — calls the Get Payment Batches API; `get_invoice_list(cfg, token, payment_file_id, page)` — calls the Get Invoice List API |
 | `scripts/repository.py` | All DB read/write functions (see §5) |
-| `scripts/sync_payment_files.py` | `sync_payment_files(cursor, cfg, token, interface_id)` — pulls new payment-file batches (Get Payment Batches API) into `ap_payment_file_details` (tracking columns + the raw API record, on the same row), then for each new batch pulls its invoice numbers (Get Invoice List API) into `ap_invoices` + each raw `invoiceAPBatchDetails[]` entry into `ap_batch_invoice_details` (its nested `allocationValues[]`/`custom[]` into their own child tables); paginates both APIs via `data.totalPages` and skips batches/invoice numbers already stored |
-| `scripts/process_invoices.py` | Main orchestrator — entry point for the full pipeline, takes `--interface-id` |
+| `scripts/sync_payment_files.py` | `sync_payment_files(cursor, cfg, token, interface_id, from_date=None, to_date=None)` — pulls new payment-file batches (Get Payment Batches API) into `ap_payment_file_details` (tracking columns + the raw API record, on the same row), then for each new batch pulls its invoice numbers (Get Invoice List API) into `ap_invoices` + each raw `invoiceAPBatchDetails[]` entry into `ap_batch_invoice_details` (its nested `allocationValues[]`/`custom[]` into their own child tables); paginates both APIs via `data.totalPages` and skips batches/invoice numbers already stored. `from_date`/`to_date` default to `[today - GetPaymentBatches.LookbackDays, today]` when omitted; pass both to pull a specific date or date range instead |
+| `scripts/process_invoices.py` | Main orchestrator — entry point for the full pipeline, takes `--interface-id` plus optional trailing date argument(s) (see §5, §7.5) |
 | `scripts/fetch_ap_invoices.py` | Standalone helper — reads `ap_invoices` into a pandas DataFrame (ad hoc use / debugging) |
 | `scripts/export_invoices_csv.py` | Joins `invoice_summary` → `invoice_detail` → `invoice_line_detail` → `invoice_service` → `invoice_charge`, optionally scoped to one `invoice_process_uuid`, and writes one combined, timestamped CSV |
 | `scripts/delivery.py` | `upload_to_sftp()` puts the CSV on the SFTP server; `send_success_email()` / `send_failure_email()` send the configured email template with the CSV attached. Both log their outcome. |
@@ -286,11 +286,11 @@ InvoiceApi:
     PageSize: 50
     Expand: true
   GetPaymentBatches:
-    Endpoint: /invoices/invoiceAPBatches
+    Endpoint: /api/v2/invoices/invoiceAPBatches
     PageSize: 50
     LookbackDays: 1
   GetInvoiceList:
-    Endpoint: /invoices/invoiceAPBatchesDetails
+    Endpoint: /api/v2/invoices/invoiceAPBatchesDetails
     PageSize: 50
     Expand: false
 
@@ -403,9 +403,11 @@ root) or absolute; both are created automatically if missing.
   `requests.get` wrapper) starting at page 1, following `data.totalPages`
   until every page's `data.records` has been collected; raises `RuntimeError`
   if `payload.success` is falsy for any page.
-- `sync_payment_files(cursor, cfg, token, interface_id) -> list[int]` —
+- `sync_payment_files(cursor, cfg, token, interface_id, from_date=None, to_date=None) -> list[int]` —
   Step 2a of the pipeline (see §1). Calls the Get Payment Batches API over
-  `[today - GetPaymentBatches.LookbackDays, today]` (UTC) and, for **every**
+  `[today - GetPaymentBatches.LookbackDays, today]` (UTC) by default, or over
+  `[from_date, to_date]` when both are given (threaded through from
+  `process_invoices.py`'s optional CLI date argument(s), see below), and for **every**
   batch returned — no existence check, even if its `paymentFileId` was
   already seen on a prior run — inserts a fresh `ap_payment_file_details` row
   (tracking columns + raw API record together, `insert_payment_file`), then
@@ -446,22 +448,30 @@ root) or absolute; both are created automatically if missing.
   hide the others, or the original error). Either way, `process_payment_file`
   never re-raises, so the run continues to the next payment file rather than
   aborting the whole invocation.
-- `main(interface_id: int | None = None) -> None` — if `interface_id` isn't
-  passed in directly (e.g. from Airflow), parses it from `--interface-id` via
-  argparse. Loads config and sets up logging (a failure at this exact point is
-  printed to stderr, since the log file depends on the config that just failed
-  to load); opens the DB connection (logged and re-raised on failure);
-  authenticates *after* the `interfaceconfiguration` overlay is applied (so
-  the right interface's credentials are used); calls `sync_payment_files()`
-  (Step 2a — pulls any new payment files + invoice numbers from the upstream
-  API, see above) and commits — this whole setup phase, up to and including
-  the open-payment-files query, is wrapped so any failure is logged with full
-  context before re-raising, since a failure here means no payment file can be
-  processed at all; then runs `process_payment_file()` for each open payment
-  file found (including any just inserted by `sync_payment_files()`).
+- `main(interface_id: int | None = None, from_date: date | None = None, to_date: date | None = None) -> None` —
+  if `interface_id` isn't passed in directly (e.g. from Airflow), parses it
+  from `--interface-id` via argparse, along with an optional trailing `dates`
+  positional (0, 1, or 2 values, each validated `YYYY-MM-DD`): one date sets
+  `from_date = to_date` to that day; two dates set `from_date`/`to_date` to
+  that range (rejected via `parser.error()` if the start is after the end, or
+  if more than 2 dates are given). Loads config and sets up logging (a failure
+  at this exact point is printed to stderr, since the log file depends on the
+  config that just failed to load); opens the DB connection (logged and
+  re-raised on failure); authenticates *after* the `interfaceconfiguration`
+  overlay is applied (so the right interface's credentials are used); calls
+  `sync_payment_files(..., from_date=from_date, to_date=to_date)` (Step 2a —
+  pulls any new payment files + invoice numbers from the upstream API, see
+  above — the date window defaults to `GetPaymentBatches.LookbackDays` when
+  `from_date`/`to_date` are `None`) and commits — this whole setup phase, up
+  to and including the open-payment-files query, is wrapped so any failure is
+  logged with full context before re-raising, since a failure here means no
+  payment file can be processed at all; then runs `process_payment_file()` for
+  each open payment file found (including any just inserted by
+  `sync_payment_files()`).
   **This is the function to run/schedule** — invoked directly via
-  `python scripts/process_invoices.py --interface-id <id>` or by the Airflow
-  DAG (`dags/invoice_sync_dag.py`).
+  `python scripts/process_invoices.py --interface-id <id> [DATE [DATE]]` or by
+  the Airflow DAG (`dags/invoice_sync_dag.py`, which only ever passes
+  `interface_id` and so always gets the default lookback window).
 
 ### `scripts/auth_client.py`
 - `authenticate(cfg: InvoiceApiConfig) -> str` — fails fast with `RuntimeError`
@@ -479,11 +489,11 @@ root) or absolute; both are created automatically if missing.
   a `Bearer` auth header. Returns the raw `requests.Response` (caller decides
   how to handle non-2xx / bad JSON).
 - `get_payment_batches(cfg, token, from_date, to_date, page=1) -> requests.Response` —
-  calls `GET {BaseUri}{GetPaymentBatches.Endpoint}` (`/invoices/invoiceAPBatches`)
+  calls `GET {BaseUri}{GetPaymentBatches.Endpoint}` (`/api/v2/invoices/invoiceAPBatches`)
   with `fromDate`, `toDate`, `page`, `pageSize`, `sortBy`, `sortOrder`, `export`
   query params and a `Bearer` auth header.
 - `get_invoice_list(cfg, token, payment_file_id, page=1) -> requests.Response` —
-  calls `GET {BaseUri}{GetInvoiceList.Endpoint}` (`/invoices/invoiceAPBatchesDetails`)
+  calls `GET {BaseUri}{GetInvoiceList.Endpoint}` (`/api/v2/invoices/invoiceAPBatchesDetails`)
   with `paymentFileId`, `page`, `pageSize`, `sortBy`, `sortOrder`, `expand`,
   `export` query params and a `Bearer` auth header.
 
@@ -652,6 +662,20 @@ processes every invoice (Get Invoice API → `invoice_response_log` →
 `ap_invoices` → detail tables), generates a UUID-scoped CSV export, uploads it
 to SFTP, sends the success or failure email depending on whether any invoice
 failed (see §6), and marks the batch `Success`/`Failure` accordingly.
+
+By default the Get Payment Batches pull covers `[today -
+GetPaymentBatches.LookbackDays, today]`. Override that window with one or two
+optional trailing `YYYY-MM-DD` date arguments:
+```bash
+# a single date -- from_date = to_date = 2026-09-01
+python scripts/process_invoices.py --interface-id 1 2026-09-01
+
+# a date range
+python scripts/process_invoices.py --interface-id 1 2026-08-01 2026-08-31
+```
+Everything downstream of the sync (finding `'New'` payment files, processing
+their invoices) is unaffected by this override — it only changes which
+upstream batches get pulled in during Step 2a.
 
 Every run prints progress to the terminal **and** writes the same lines to a
 fresh timestamped file at `logs/process_invoices_<YYYYMMDD_HHMMSS>.log`. If a

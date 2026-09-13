@@ -48,7 +48,14 @@ def _fetch_all_pages(call, api_label: str) -> list:
     return records
 
 
-def sync_payment_files(cursor, cfg: AppConfig, token: str, interface_id: int) -> list:
+def sync_payment_files(
+    cursor,
+    cfg: AppConfig,
+    token: str,
+    interface_id: int,
+    from_date=None,
+    to_date=None,
+) -> list:
     """Step 1: pull every payment-file batch the upstream API returns for the
     configured date window and insert a fresh ap_payment_file_details row for
     EACH one, every run -- no existence check against a prior run's row. A
@@ -65,10 +72,16 @@ def sync_payment_files(cursor, cfg: AppConfig, token: str, interface_id: int) ->
 
     Step 2 for every batch: pull its invoice list from the upstream API and
     insert the invoice numbers into ap_invoices. Returns the
-    ap_payment_file_details.id values inserted this run."""
+    ap_payment_file_details.id values inserted this run.
+
+    from_date/to_date default to the last GetPaymentBatches.LookbackDays day(s)
+    ending today; pass both to pull a specific date or date range instead (the
+    CLI's optional date argument(s))."""
     batches_cfg = cfg.invoice_api.get_payment_batches
-    to_date = datetime.now(timezone.utc).date()
-    from_date = to_date - timedelta(days=batches_cfg.lookback_days)
+    if to_date is None:
+        to_date = datetime.now(timezone.utc).date()
+    if from_date is None:
+        from_date = to_date - timedelta(days=batches_cfg.lookback_days)
 
     logger.info(
         "Payment file sync: pulling payment batches from %s to %s for InterfaceId=%s",
