@@ -292,7 +292,7 @@ InvoiceApi:
   GetInvoiceList:
     Endpoint: /api/v2/invoices/invoiceAPBatchesDetails
     PageSize: 50
-    Expand: false
+    Expand: true
 
 Output:
   Folder: output
@@ -399,6 +399,11 @@ root) or absolute; both are created automatically if missing.
   line_detail → service → charge.
 
 ### `scripts/sync_payment_files.py`
+- `_to_api_datetime(d: date, end_of_day: bool = False) -> str` — formats a
+  `date` as the ISO 8601 UTC datetime the invoice API requires for
+  `fromDate`/`toDate` (`yyyy-MM-ddTHH:mm:ssZ`): `00:00:00Z` by default, or
+  `23:59:59Z` with `end_of_day=True` so a `to_date` bound covers that whole
+  day.
 - `_fetch_all_pages(call, api_label) -> list` — calls `call(page)` (a
   `requests.get` wrapper) starting at page 1, following `data.totalPages`
   until every page's `data.records` has been collected; raises `RuntimeError`
@@ -407,7 +412,9 @@ root) or absolute; both are created automatically if missing.
   Step 2a of the pipeline (see §1). Calls the Get Payment Batches API over
   `[today - GetPaymentBatches.LookbackDays, today]` (UTC) by default, or over
   `[from_date, to_date]` when both are given (threaded through from
-  `process_invoices.py`'s optional CLI date argument(s), see below), and for **every**
+  `process_invoices.py`'s optional CLI date argument(s), see below) — each
+  bound passed through `_to_api_datetime()` before being sent as `fromDate`/
+  `toDate`, since the API rejects a bare `YYYY-MM-DD` — and for **every**
   batch returned — no existence check, even if its `paymentFileId` was
   already seen on a prior run — inserts a fresh `ap_payment_file_details` row
   (tracking columns + raw API record together, `insert_payment_file`), then
@@ -491,11 +498,17 @@ root) or absolute; both are created automatically if missing.
 - `get_payment_batches(cfg, token, from_date, to_date, page=1) -> requests.Response` —
   calls `GET {BaseUri}{GetPaymentBatches.Endpoint}` (`/api/v2/invoices/invoiceAPBatches`)
   with `fromDate`, `toDate`, `page`, `pageSize`, `sortBy`, `sortOrder`, `export`
-  query params and a `Bearer` auth header.
+  query params and a `Bearer` auth header. `fromDate`/`toDate` must already be
+  formatted as ISO 8601 UTC datetimes (`yyyy-MM-ddTHH:mm:ssZ`) — built by
+  `sync_payment_files._to_api_datetime()` from the `date` window, `00:00:00Z`
+  for `from_date` and `23:59:59Z` for `to_date`.
 - `get_invoice_list(cfg, token, payment_file_id, page=1) -> requests.Response` —
   calls `GET {BaseUri}{GetInvoiceList.Endpoint}` (`/api/v2/invoices/invoiceAPBatchesDetails`)
   with `paymentFileId`, `page`, `pageSize`, `sortBy`, `sortOrder`, `expand`,
-  `export` query params and a `Bearer` auth header.
+  `export` query params and a `Bearer` auth header. `expand` defaults to
+  `true` (`GetInvoiceList.Expand` in `appsettings.yml`) so the response
+  includes related invoice details — the API's `expand` param description is
+  "Include related invoice details in the response."
 
 ### `scripts/fetch_ap_invoices.py` (standalone utility, not part of the pipeline)
 - `fetch_ap_invoices() -> pd.DataFrame` — ad hoc read of `ap_invoices` via SQLAlchemy.
@@ -673,6 +686,10 @@ python scripts/process_invoices.py --interface-id 1 2026-09-01
 # a date range
 python scripts/process_invoices.py --interface-id 1 2026-08-01 2026-08-31
 ```
+Each `YYYY-MM-DD` argument is a calendar date only — `sync_payment_files()`
+converts it to the `fromDate`/`toDate` ISO 8601 UTC datetime the API requires
+before calling Get Payment Batches (see `_to_api_datetime()` above).
+
 Everything downstream of the sync (finding `'New'` payment files, processing
 their invoices) is unaffected by this override — it only changes which
 upstream batches get pulled in during Step 2a.

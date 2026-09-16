@@ -219,7 +219,7 @@ def load_config(path: str = APPSETTINGS_PATH, interface_values: dict | None = No
             get_invoice_list=GetInvoiceListConfig(
                 endpoint=get_invoice_list_raw.get("Endpoint", "/invoices/invoiceAPBatchesDetails"),
                 page_size=get_invoice_list_raw.get("PageSize", 50),
-                expand=get_invoice_list_raw.get("Expand", False),
+                expand=get_invoice_list_raw.get("Expand", True),
             ),
         ),
         output=OutputConfig(

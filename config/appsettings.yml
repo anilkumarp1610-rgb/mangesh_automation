@@ -32,7 +32,7 @@ InvoiceApi:
   GetInvoiceList:
     Endpoint: /api/v2/invoices/invoiceAPBatchesDetails
     PageSize: 50
-    Expand: false
+    Expand: true
 
 Output:
   Folder: output

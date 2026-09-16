@@ -1,5 +1,5 @@
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, time, timedelta, timezone
 
 from config import AppConfig
 from invoice_client import get_invoice_list, get_payment_batches
@@ -12,6 +12,16 @@ from repository import (
 )
 
 logger = logging.getLogger(__name__)
+
+_API_DATETIME_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
+
+
+def _to_api_datetime(d, end_of_day: bool = False) -> str:
+    """Format a date as the ISO 8601 UTC datetime the invoice API requires
+    (yyyy-MM-ddTHH:mm:ssZ). end_of_day=True pins the time to 23:59:59 so a
+    to_date bound is inclusive of that whole day."""
+    time_part = time(23, 59, 59) if end_of_day else time(0, 0, 0)
+    return datetime.combine(d, time_part).strftime(_API_DATETIME_FORMAT)
 
 
 def _fetch_all_pages(call, api_label: str) -> list:
@@ -91,7 +101,11 @@ def sync_payment_files(
     )
     batch_records = _fetch_all_pages(
         lambda page: get_payment_batches(
-            cfg.invoice_api, token, from_date.isoformat(), to_date.isoformat(), page
+            cfg.invoice_api,
+            token,
+            _to_api_datetime(from_date),
+            _to_api_datetime(to_date, end_of_day=True),
+            page,
         ),
         "Get Payment Batches API",
     )
