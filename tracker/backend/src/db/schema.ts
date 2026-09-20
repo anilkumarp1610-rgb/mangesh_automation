@@ -27,6 +27,21 @@ const REQUIRED: { table: string; column: string; fix: string }[] = [
     column: 'invoice_process_uuid',
     fix: 'apply sql/migrate_merge_ap_invoices_process_log.sql',
   },
+  {
+    table: 'ap_run_log',
+    column: 'id',
+    fix: 'apply sql/apply_logging_changes.sql (or create_run_log_table.sql)',
+  },
+  {
+    table: 'ap_process_log',
+    column: 'id',
+    fix: 'apply sql/apply_logging_changes.sql (or create_process_log_table.sql)',
+  },
+  {
+    table: 'ap_payment_file_details',
+    column: 'run_log_id',
+    fix: 'apply sql/apply_logging_changes.sql (or create_run_log_table.sql)',
+  },
 ];
 
 export async function assertSchema(): Promise<void> {

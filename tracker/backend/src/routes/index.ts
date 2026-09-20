@@ -8,6 +8,7 @@ import { dataTablesRouter } from '../modules/dataTables/dataTables.routes.js';
 import { interfacesRouter } from '../modules/interfaces/interfaces.routes.js';
 import { invoicesRouter } from '../modules/invoices/invoices.routes.js';
 import { responseLogsRouter } from '../modules/responseLogs/responseLogs.routes.js';
+import { runLogsRouter } from '../modules/runLogs/runLogs.routes.js';
 
 export const apiRouter = Router();
 
@@ -28,6 +29,7 @@ apiRouter.get(
 );
 
 apiRouter.use('/dashboard', dashboardRouter);
+apiRouter.use('/run-logs', runLogsRouter);
 apiRouter.use('/interfaces', interfacesRouter);
 apiRouter.use('/ap-batches', apBatchesRouter);
 apiRouter.use('/ap-invoices', apInvoicesRouter);

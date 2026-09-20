@@ -1,0 +1,95 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Debug: process_invoices (default lookback window)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/scripts/process_invoices.py",
+            "cwd": "${workspaceFolder}/scripts",
+            "args": ["--interface-id", "${input:interfaceId}"],
+            "justMyCode": true,
+            "console": "integratedTerminal"
+        },
+        {
+            "name": "Debug: process_invoices (single date)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/scripts/process_invoices.py",
+            "cwd": "${workspaceFolder}/scripts",
+            "args": ["--interface-id", "${input:interfaceId}", "${input:singleDate}"],
+            "justMyCode": true,
+            "console": "integratedTerminal"
+        },
+        {
+            "name": "Debug: process_invoices (date range)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/scripts/process_invoices.py",
+            "cwd": "${workspaceFolder}/scripts",
+            "args": ["--interface-id", "${input:interfaceId}", "${input:fromDate}", "${input:toDate}"],
+            "justMyCode": true,
+            "console": "integratedTerminal"
+        },
+        {
+            "name": "Debug: process_invoices (--ap-batch-name)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/scripts/process_invoices.py",
+            "cwd": "${workspaceFolder}/scripts",
+            "args": ["--interface-id", "${input:interfaceId}", "--ap-batch-name", "${input:apBatchName}"],
+            "justMyCode": true,
+            "console": "integratedTerminal"
+        },
+        {
+            "name": "Debug: export_invoices_csv.py (standalone)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/scripts/export_invoices_csv.py",
+            "cwd": "${workspaceFolder}/scripts",
+            "justMyCode": true,
+            "console": "integratedTerminal"
+        },
+        {
+            "name": "Debug: current file",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${file}",
+            "cwd": "${workspaceFolder}/scripts",
+            "justMyCode": true,
+            "console": "integratedTerminal"
+        }
+    ],
+    "inputs": [
+        {
+            "id": "interfaceId",
+            "type": "promptString",
+            "description": "interfaceconfiguration.InterfaceId",
+            "default": "1"
+        },
+        {
+            "id": "singleDate",
+            "type": "promptString",
+            "description": "Single date to process (YYYY-MM-DD)",
+            "default": "2026-09-01"
+        },
+        {
+            "id": "fromDate",
+            "type": "promptString",
+            "description": "Date range: from (YYYY-MM-DD)",
+            "default": "2026-09-01"
+        },
+        {
+            "id": "toDate",
+            "type": "promptString",
+            "description": "Date range: to (YYYY-MM-DD)",
+            "default": "2026-09-01"
+        },
+        {
+            "id": "apBatchName",
+            "type": "promptString",
+            "description": "Exact ApBatchName to process (instead of a date window)",
+            "default": "Kaiser Permanente_AP_Payment_File_2026-09-01 14:43:11"
+        }
+    ]
+}

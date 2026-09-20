@@ -1,4 +1,4 @@
-import { ArrowLeft } from 'lucide-react';
+import { ArrowLeft, ChevronRight } from 'lucide-react';
 import { Link, useParams } from 'react-router-dom';
 import { Breadcrumbs } from '@/components/breadcrumbs';
 import { FieldList, recordToFields } from '@/components/field-list';
@@ -39,6 +39,11 @@ export function ApInvoiceDetailPage() {
   const { id } = useParams<{ id: string }>();
   const query = useResourceQuery<ApInvoiceDetail>(`ap-invoice-${id}`, `/ap-invoices/${id}`);
   const inv = query.data;
+  // invoice_summary only exists once the invoice was actually processed
+  // (Get Invoice API returned SUCCESS -- see process_invoices.py::process_invoice()),
+  // so this drill-down is absent for FAILED/PENDING invoices -- nothing to
+  // drill into yet for those.
+  const summaryInvoiceId = inv?.summary?.invoice_id as number | undefined;
 
   return (
     <>
@@ -61,12 +66,22 @@ export function ApInvoiceDetailPage() {
         title={inv ? inv.ap_invoice_number : `AP Invoice ${id}`}
         description="Source invoice record, API status and response history."
         actions={
-          <Button variant="outline" size="sm" asChild>
-            <Link to="/ap-batches">
-              <ArrowLeft className="mr-2 h-4 w-4" />
-              Batches
-            </Link>
-          </Button>
+          <>
+            {summaryInvoiceId && (
+              <Button size="sm" asChild>
+                <Link to={`/invoices/${summaryInvoiceId}`}>
+                  Full Invoice Detail
+                  <ChevronRight className="ml-2 h-4 w-4" />
+                </Link>
+              </Button>
+            )}
+            <Button variant="outline" size="sm" asChild>
+              <Link to="/ap-batches">
+                <ArrowLeft className="mr-2 h-4 w-4" />
+                Batches
+              </Link>
+            </Button>
+          </>
         }
       />
 
@@ -142,12 +157,23 @@ export function ApInvoiceDetailPage() {
               ))}
             </TabsContent>
 
-            <TabsContent value="summary" className="mt-4">
+            <TabsContent value="summary" className="mt-4 space-y-3">
               {inv.summary ? (
-                <FieldList columns={3} fields={recordToFields(inv.summary)} />
+                <>
+                  <FieldList columns={3} fields={recordToFields(inv.summary)} />
+                  {summaryInvoiceId && (
+                    <Button size="sm" variant="outline" asChild>
+                      <Link to={`/invoices/${summaryInvoiceId}`}>
+                        Drill into Detail / Lines / Services / Charges
+                        <ChevronRight className="ml-2 h-4 w-4" />
+                      </Link>
+                    </Button>
+                  )}
+                </>
               ) : (
                 <p className="text-sm text-muted-foreground">
-                  No invoice_summary row found for {inv.ap_invoice_number}.
+                  No invoice_summary row found for {inv.ap_invoice_number} — it only exists once this
+                  invoice has been processed successfully (API status SUCCESS).
                 </p>
               )}
             </TabsContent>

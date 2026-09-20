@@ -35,6 +35,18 @@ const schema = z.object({
   AIRFLOW_PASSWORD: z.string().optional(),
   AIRFLOW_DAG_ID: z.string().default('invoice_execution_dag'),
 
+  // --- Direct pipeline trigger (Reprocess button) ---
+  // Spawns `PIPELINE_PYTHON_EXECUTABLE process_invoices.py --interface-id <id>
+  // --ap-batch-name <name>` in PIPELINE_SCRIPTS_DIR. Kept separate from the
+  // Airflow trigger above (still unimplemented) -- this is a direct
+  // child_process.spawn(), always with an argv array, never a shell string.
+  PIPELINE_PYTHON_EXECUTABLE: z.string().default('python'),
+  PIPELINE_SCRIPTS_DIR: z.string().default('../../scripts'),
+  // How long to wait for the triggered run's ap_run_log row to appear before
+  // giving up on the request (the run itself keeps going in the background
+  // either way -- this only bounds how long the HTTP request waits).
+  PIPELINE_TRIGGER_POLL_TIMEOUT_MS: z.coerce.number().int().positive().default(15_000),
+
   LOG_LEVEL: z
     .enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace'])
     .default('info'),

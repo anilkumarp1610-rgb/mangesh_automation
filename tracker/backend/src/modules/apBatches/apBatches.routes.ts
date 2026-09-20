@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { asyncHandler } from '../../lib/asyncHandler.js';
 import { NotFoundError, ValidationError } from '../../lib/errors.js';
+import { reprocessBatch } from '../reprocess/reprocess.repo.js';
 import { getBatch, listBatchInvoices, listBatches } from './apBatches.repo.js';
 
 export const apBatchesRouter = Router();
@@ -33,5 +34,14 @@ apBatchesRouter.get(
   asyncHandler(async (req, res) => {
     const id = intParam(req.params.id, 'id');
     res.json(await listBatchInvoices(req, id));
+  }),
+);
+
+apBatchesRouter.post(
+  '/:id/reprocess',
+  asyncHandler(async (req, res) => {
+    const id = intParam(req.params.id, 'id');
+    const result = await reprocessBatch(id);
+    res.status(202).json({ data: result });
   }),
 );

@@ -1,5 +1,5 @@
 import { useQuery } from '@tanstack/react-query';
-import { BarChart3, CheckCircle2, Table2, XCircle } from 'lucide-react';
+import { BarChart3, CheckCircle2, Circle, Table2, XCircle } from 'lucide-react';
 import * as React from 'react';
 import {
   Bar,
@@ -26,15 +26,17 @@ import { api } from '@/lib/api';
 interface MonthRow {
   month: string;
   monthLabel: string;
+  new: number;
   success: number;
   failure: number;
   total: number;
 }
 interface Resp {
   data: MonthRow[];
-  totals: { success: number; failure: number; processed: number; successRate: number };
+  totals: { new: number; success: number; failure: number; total: number; successRate: number };
 }
 
+const NEW = 'hsl(var(--chart-new))';
 const SUCCESS = 'hsl(var(--chart-success))';
 const FAILURE = 'hsl(var(--chart-failure))';
 
@@ -54,6 +56,10 @@ function ChartTooltip({
   return (
     <div className="rounded-md border bg-popover px-3 py-2 text-xs shadow-md">
       <p className="mb-1 font-medium text-popover-foreground">{label}</p>
+      <p className="flex items-center gap-1.5">
+        <span className="inline-block h-2 w-2 rounded-sm" style={{ background: NEW }} />
+        New<span className="ml-auto pl-4 font-medium">{get('new')}</span>
+      </p>
       <p className="flex items-center gap-1.5">
         <span className="inline-block h-2 w-2 rounded-sm" style={{ background: SUCCESS }} />
         Success<span className="ml-auto pl-4 font-medium">{get('success')}</span>
@@ -82,12 +88,12 @@ export function MonthlyBatchChart() {
     <Card>
       <CardHeader className="flex flex-row flex-wrap items-start justify-between gap-3 space-y-0">
         <div>
-          <CardTitle className="text-base">AP Batches Processed — by Month</CardTitle>
+          <CardTitle className="text-base">AP Batches — by Month</CardTitle>
           <p className="mt-1 text-sm text-muted-foreground">
-            Processed batches split by outcome.{' '}
+            New / Success / Failure, by the month each batch reached that state.{' '}
             {totals && (
               <span>
-                {totals.processed} processed · {totals.successRate}% success
+                {totals.total} total · {totals.successRate}% success of processed
               </span>
             )}
           </p>
@@ -130,6 +136,10 @@ export function MonthlyBatchChart() {
         {/* legend — identity is never colour alone */}
         <div className="mb-4 flex items-center gap-4 text-sm">
           <span className="flex items-center gap-1.5">
+            <Circle className="h-4 w-4" style={{ color: NEW }} />
+            New
+          </span>
+          <span className="flex items-center gap-1.5">
             <CheckCircle2 className="h-4 w-4" style={{ color: SUCCESS }} />
             Success
           </span>
@@ -145,9 +155,9 @@ export function MonthlyBatchChart() {
           <p className="py-16 text-center text-sm text-destructive">
             {query.error instanceof Error ? query.error.message : 'Failed to load'}
           </p>
-        ) : totals && totals.processed === 0 ? (
+        ) : totals && totals.total === 0 ? (
           <p className="py-16 text-center text-sm text-muted-foreground">
-            No processed batches in this period.
+            No batches in this period.
           </p>
         ) : view === 'chart' ? (
           <div className="h-[300px] w-full">
@@ -171,7 +181,15 @@ export function MonthlyBatchChart() {
                   cursor={{ fill: 'hsl(var(--muted))', opacity: 0.4 }}
                   content={<ChartTooltip />}
                 />
-                <Bar dataKey="success" name="Success" fill={SUCCESS} radius={[3, 3, 0, 0]} maxBarSize={28}>
+                <Bar dataKey="new" name="New" fill={NEW} radius={[3, 3, 0, 0]} maxBarSize={22}>
+                  <LabelList
+                    dataKey="new"
+                    position="top"
+                    formatter={nonZero}
+                    style={{ fontSize: 11, fill: 'hsl(var(--muted-foreground))' }}
+                  />
+                </Bar>
+                <Bar dataKey="success" name="Success" fill={SUCCESS} radius={[3, 3, 0, 0]} maxBarSize={22}>
                   <LabelList
                     dataKey="success"
                     position="top"
@@ -179,7 +197,7 @@ export function MonthlyBatchChart() {
                     style={{ fontSize: 11, fill: 'hsl(var(--muted-foreground))' }}
                   />
                 </Bar>
-                <Bar dataKey="failure" name="Failure" fill={FAILURE} radius={[3, 3, 0, 0]} maxBarSize={28}>
+                <Bar dataKey="failure" name="Failure" fill={FAILURE} radius={[3, 3, 0, 0]} maxBarSize={22}>
                   <LabelList
                     dataKey="failure"
                     position="top"
@@ -196,6 +214,7 @@ export function MonthlyBatchChart() {
               <thead className="bg-muted/60 text-left">
                 <tr>
                   <th className="p-2.5 font-medium">Month</th>
+                  <th className="p-2.5 text-right font-medium">New</th>
                   <th className="p-2.5 text-right font-medium">Success</th>
                   <th className="p-2.5 text-right font-medium">Failure</th>
                   <th className="p-2.5 text-right font-medium">Total</th>
@@ -205,6 +224,7 @@ export function MonthlyBatchChart() {
                 {rows.map((r) => (
                   <tr key={r.month} className="border-t">
                     <td className="p-2.5">{r.monthLabel}</td>
+                    <td className="p-2.5 text-right">{r.new}</td>
                     <td className="p-2.5 text-right">{r.success}</td>
                     <td className="p-2.5 text-right">{r.failure}</td>
                     <td className="p-2.5 text-right font-medium">{r.total}</td>
@@ -215,9 +235,10 @@ export function MonthlyBatchChart() {
                 <tfoot>
                   <tr className="border-t bg-muted/40 font-medium">
                     <td className="p-2.5">Total</td>
+                    <td className="p-2.5 text-right">{totals.new}</td>
                     <td className="p-2.5 text-right">{totals.success}</td>
                     <td className="p-2.5 text-right">{totals.failure}</td>
-                    <td className="p-2.5 text-right">{totals.processed}</td>
+                    <td className="p-2.5 text-right">{totals.total}</td>
                   </tr>
                 </tfoot>
               )}

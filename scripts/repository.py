@@ -59,6 +59,7 @@ _STRING_COLUMN_KEY_MAP = {
     "Failure_Subject": "Email.FailureNotification.Subject",
     "Failure_Body": "Email.FailureNotification.Body",
     "Output_Directory": "Output.Folder",
+    "Platform_DB_AP_Query": "PlatformDb.ApQuery",
     # Replaces the old hardcoded Jobs.CBTS_AP.OutputPrefix lookup: whichever
     # interface is running gets its own name as the output filename prefix,
     # with no per-interface config needed.
@@ -69,6 +70,7 @@ _BOOLEAN_COLUMN_KEY_MAP = {
     "Email_Enabled": "Email.Enabled",
     "Email_Attachment_Enabled": "Email.Attachment.Enabled",
     "Failure_Notification_Enabled": "Email.FailureNotification.Enabled",
+    "IncludeHeader": "Output.IncludeHeader",
 }
 _LIST_COLUMN_KEY_MAP = {
     "Email_Recipients_To": "Email.Recipients.To",
@@ -145,7 +147,8 @@ def load_interface_configuration(cursor: MySQLCursor, interface_id: int) -> dict
 def get_open_payment_files(cursor: MySQLCursor, interface_id: int) -> list:
     cursor.execute(
         """
-        SELECT id, ap_batch_name, ap_batch_payment_file_id, interface_id, ap_batch_status
+        SELECT id, ap_batch_name, ap_batch_payment_file_id, interface_id, ap_batch_status,
+               ap_created_date
         FROM ap_payment_file_details
         WHERE interface_id = %s AND ap_batch_status = 'New'
         """,
@@ -160,26 +163,67 @@ def get_open_payment_files(cursor: MySQLCursor, interface_id: int) -> list:
     return rows
 
 
+def insert_run_log(
+    cursor: MySQLCursor,
+    interface_id: int,
+    from_date=None,
+    to_date=None,
+    ap_batch_name: str = None,
+) -> int:
+    """Inserts one ap_run_log row marking the start of a process_invoices.py
+    run -- the interface being processed and exactly what was passed on the
+    CLI (from_date/to_date, or ap_batch_name, or neither for the default
+    LookbackDays window -- whichever weren't used stay NULL). Called once,
+    immediately after the DB connection opens, before anything else -- see
+    main()'s standalone commit of this insert so the record survives even if
+    the rest of the run fails."""
+    data = {
+        "interface_id": interface_id,
+        "from_date": from_date,
+        "to_date": to_date,
+        "ap_batch_name": ap_batch_name,
+    }
+    run_log_id = insert(cursor, "ap_run_log", data)
+    logger.debug(
+        "ap_run_log: inserted id=%s for interface_id=%s (from_date=%s, to_date=%s, ap_batch_name=%s)",
+        run_log_id,
+        interface_id,
+        from_date,
+        to_date,
+        ap_batch_name,
+    )
+    return run_log_id
+
+
 def insert_payment_file(
-    cursor: MySQLCursor, interface_id: int, payment_file_id, batch_name: str, record: dict
+    cursor: MySQLCursor,
+    interface_id: int,
+    payment_file_id,
+    batch_name: str,
+    record: dict,
+    run_log_id: int = None,
 ) -> int:
     """Inserts one ap_payment_file_details row for a batch just pulled from
     the Get Payment Batches API -- both the pipeline-owned tracking columns
     (ap_batch_status/processed_date/log_id) and the raw API metadata
     (client, ap_payment_file_status, amounts, etc., via BATCH_DETAILS_FIELD_MAP)
     live on this single row (formerly split into a separate ap_batch_details
-    table -- merged since it was always a 1:1 shadow, never queried alone)."""
+    table -- merged since it was always a 1:1 shadow, never queried alone).
+    run_log_id ties this row back to the ap_run_log row for the run that
+    pulled it (see insert_run_log)."""
     data = map_record(record, BATCH_DETAILS_FIELD_MAP)
     data["ap_batch_name"] = batch_name
     data["ap_batch_payment_file_id"] = payment_file_id
     data["interface_id"] = interface_id
     data["ap_batch_status"] = "New"
+    data["run_log_id"] = run_log_id
     payment_file_detail_id = insert(cursor, "ap_payment_file_details", data)
     logger.debug(
-        "ap_payment_file_details: inserted id=%s for paymentFileId=%s (interface_id=%s)",
+        "ap_payment_file_details: inserted id=%s for paymentFileId=%s (interface_id=%s, run_log_id=%s)",
         payment_file_detail_id,
         payment_file_id,
         interface_id,
+        run_log_id,
     )
     return payment_file_detail_id
 

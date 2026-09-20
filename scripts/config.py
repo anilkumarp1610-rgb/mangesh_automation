@@ -73,6 +73,10 @@ class OutputConfig:
     folder: str
     file_name: str
     tables: list[ExportTableConfig] = field(default_factory=list)
+    # Sourced from interfaceconfiguration.IncludeHeader (see
+    # repository.py::load_interface_configuration) -- whether the generated
+    # CSV's first row is a header row. Defaults true (include the header).
+    include_header: bool = True
 
 
 @dataclass
@@ -136,6 +140,11 @@ class AppConfig:
     job: JobConfig
     sftp: SftpConfig
     email: EmailConfig
+    # Sourced from interfaceconfiguration.Platform_DB_AP_Query (see
+    # repository.py::load_interface_configuration) -- the AP output CSV query,
+    # parameterized with %(ap_payment_file_detail_id)s. Empty when not yet
+    # configured for the running interface.
+    platform_db_ap_query: str = ""
 
 
 def _expand_env(value):
@@ -178,6 +187,7 @@ def load_config(path: str = APPSETTINGS_PATH, interface_values: dict | None = No
     # overlays interfaceconfiguration.InterfaceName onto Job.OutputPrefix, so this
     # resolves per whichever --interface-id is actually running.
     job_raw = raw.get("Job", {})
+    platform_db_raw = raw.get("PlatformDb", {})
     sftp_raw = section("Sftp")
     email_raw = section("Email")
     smtp_raw = email_raw.get("Smtp", {})
@@ -233,6 +243,7 @@ def load_config(path: str = APPSETTINGS_PATH, interface_values: dict | None = No
                 )
                 for t in output_raw.get("Tables", [])
             ],
+            include_header=output_raw.get("IncludeHeader", True),
         ),
         job=JobConfig(output_prefix=job_raw.get("OutputPrefix", "")),
         sftp=SftpConfig(
@@ -268,4 +279,5 @@ def load_config(path: str = APPSETTINGS_PATH, interface_values: dict | None = No
                 recipients_cc=failure_raw.get("Recipients", {}).get("Cc", []),
             ),
         ),
+        platform_db_ap_query=platform_db_raw.get("ApQuery", ""),
     )

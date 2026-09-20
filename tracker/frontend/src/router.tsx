@@ -11,6 +11,7 @@ import { InvoiceDetailPage } from '@/pages/invoices/invoice-detail-page';
 import { InvoicesPage } from '@/pages/invoices/invoices-page';
 import { Placeholder } from '@/pages/placeholder';
 import { ResponseLogDetailPage } from '@/pages/run-logs/response-log-detail-page';
+import { RunLogsPage } from '@/pages/run-logs/run-logs-page';
 
 export const router = createBrowserRouter([
   {
@@ -18,6 +19,7 @@ export const router = createBrowserRouter([
     element: <AppShell />,
     children: [
       { index: true, element: <DashboardPage /> },
+      { path: 'run-logs', element: <RunLogsPage /> },
       { path: 'interfaces', element: <InterfacesPage /> },
       { path: 'ap-batches', element: <ApBatchesPage /> },
       { path: 'ap-batches/:id', element: <ApBatchDetailPage /> },

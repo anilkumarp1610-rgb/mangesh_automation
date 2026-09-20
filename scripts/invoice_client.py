@@ -8,19 +8,29 @@ logger = logging.getLogger(__name__)
 
 
 def get_payment_batches(
-    cfg: InvoiceApiConfig, token: str, from_date: str, to_date: str, page: int = 1
+    cfg: InvoiceApiConfig,
+    token: str,
+    from_date: str = None,
+    to_date: str = None,
+    page: int = 1,
+    ap_batch_name: str = None,
 ) -> requests.Response:
+    """Either filter by ap_batch_name (single named batch, no date window), or by
+    from_date/to_date (both required in that case -- the normal sync window)."""
     batches_cfg = cfg.get_payment_batches
     url = f"{cfg.base_uri.rstrip('/')}{batches_cfg.endpoint}"
     params = {
-        "fromDate": from_date,
-        "toDate": to_date,
         "page": page,
         "pageSize": batches_cfg.page_size,
         "sortBy": "createdDate",
         "sortOrder": "desc",
         "export": "false",
     }
+    if ap_batch_name:
+        params["apBatchName"] = ap_batch_name
+    else:
+        params["fromDate"] = from_date
+        params["toDate"] = to_date
     headers = {
         "accept": "application/json",
         "Authorization": f"Bearer {token}",

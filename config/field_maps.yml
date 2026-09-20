@@ -122,16 +122,16 @@ Charge:
 # payment_file_id/batch_name arguments (ap_payment_file_details.ap_batch_payment_file_id
 # / .ap_batch_name), so mapping them again here would just be redundant.
 BatchDetails:
-  client: client
-  apCreatedDate: ap_created_date
-  apPaymentFileStatus: ap_payment_file_status
-  noOfInvoices: no_of_invoices
-  noOfVendors: no_of_vendors
-  earliestDueDate: earliest_due_date
-  currency: currency
-  invoiceAmount: invoice_amount
-  allocatedAmount: allocated_amount
-  detailInvoiceAmount: detail_invoice_amount
+  Client: client
+  ApCreatedDate: ap_created_date
+  ApPaymentFileStatus: ap_payment_file_status
+  NoOfInvoices: no_of_invoices
+  NoOfVendors: no_of_vendors
+  EarliestDueDate: earliest_due_date
+  Currency: currency
+  InvoiceAmount: invoice_amount
+  AllocatedAmount: allocated_amount
+  DetailInvoiceAmount: detail_invoice_amount
 
 BatchInvoiceDetails:
   client: client

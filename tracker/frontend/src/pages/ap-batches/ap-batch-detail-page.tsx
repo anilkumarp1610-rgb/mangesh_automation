@@ -1,6 +1,9 @@
 import type { ColumnDef } from '@tanstack/react-table';
-import { ArrowLeft } from 'lucide-react';
+import { useMutation } from '@tanstack/react-query';
+import { ArrowLeft, RotateCw } from 'lucide-react';
+import * as React from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
+import { toast } from 'sonner';
 import { Breadcrumbs } from '@/components/breadcrumbs';
 import { DataGrid, useDataGrid } from '@/components/data-grid';
 import { FieldList } from '@/components/field-list';
@@ -11,8 +14,11 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Skeleton } from '@/components/ui/skeleton';
+import { ApiError, api } from '@/lib/api';
 import { formatDateTime } from '@/lib/format';
+import { cn } from '@/lib/utils';
 import { useListQuery, useResourceQuery } from '@/lib/use-list';
+import { RunLogProcessLogsSheet } from '@/pages/run-logs/run-log-process-logs-sheet';
 
 interface BatchDetail {
   id: number;
@@ -78,6 +84,21 @@ export function ApBatchDetailPage() {
     setSearchParams(next, { replace: true });
   };
   const batch = useResourceQuery<BatchDetail>(`ap-batch-${id}`, `/ap-batches/${id}`);
+  const [reprocessRunLogId, setReprocessRunLogId] = React.useState<number | null>(null);
+
+  // Re-runs `process_invoices.py --interface-id <id> --ap-batch-name <name>`
+  // for this exact batch (see backend modules/reprocess) -- re-pulls the
+  // batch + its invoices, regenerates the CSV, re-uploads to SFTP, and
+  // re-sends the run summary email, same as any other run.
+  const reprocess = useMutation({
+    mutationFn: () => api.post<{ data: { runLogId: number } }>(`/ap-batches/${id}/reprocess`),
+    onSuccess: (res) => {
+      toast.success(`Reprocessing started — run #${res.data.runLogId}`);
+      setReprocessRunLogId(res.data.runLogId);
+    },
+    onError: (err) =>
+      toast.error(err instanceof ApiError ? err.message : 'Failed to start reprocessing'),
+  });
 
   const invoicesGrid = useDataGrid({ prefix: 'inv', defaultSort: { id: 'apInvoiceId', desc: false } });
   const invoices = useListQuery<BatchInvoice>(
@@ -112,12 +133,25 @@ export function ApBatchDetailPage() {
         title={batch.data ? batch.data.ap_batch_name : `Batch ${id}`}
         description="Batch drill-down: invoices and API response logs."
         actions={
-          <Button variant="outline" size="sm" asChild>
-            <Link to="/ap-batches">
-              <ArrowLeft className="mr-2 h-4 w-4" />
-              All batches
-            </Link>
-          </Button>
+          <>
+            {batch.data && batch.data.ap_batch_status !== 'New' && (
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={reprocess.isPending}
+                onClick={() => reprocess.mutate()}
+              >
+                <RotateCw className={cn('mr-2 h-4 w-4', reprocess.isPending && 'animate-spin')} />
+                {reprocess.isPending ? 'Reprocessing…' : 'Reprocess'}
+              </Button>
+            )}
+            <Button variant="outline" size="sm" asChild>
+              <Link to="/ap-batches">
+                <ArrowLeft className="mr-2 h-4 w-4" />
+                All batches
+              </Link>
+            </Button>
+          </>
         }
       />
 
@@ -207,6 +241,11 @@ export function ApBatchDetailPage() {
           />
         </TabsContent>
       </Tabs>
+
+      <RunLogProcessLogsSheet
+        runLogId={reprocessRunLogId}
+        onOpenChange={(open) => !open && setReprocessRunLogId(null)}
+      />
     </>
   );
 }

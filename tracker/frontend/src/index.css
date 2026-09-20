@@ -32,6 +32,8 @@
     /* Status chart pair — validated CVD-safe (ΔE 10.3) in light and dark. */
     --chart-success: 174 84% 32%; /* teal-600  #0d9488 */
     --chart-failure: 350 89% 60%; /* rose-500  #f43f5e */
+    /* Third status series (New) — same hue StatusBadge already uses for "new". */
+    --chart-new: 217 91% 60%; /* blue-500  #3b82f6 */
   }
 
   .dark {
@@ -62,6 +64,7 @@
     /* Same pair — validator PASS against the dark surface too. */
     --chart-success: 174 84% 32%;
     --chart-failure: 350 89% 60%;
+    --chart-new: 217 91% 60%;
   }
 }
 

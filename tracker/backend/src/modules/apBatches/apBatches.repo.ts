@@ -12,11 +12,15 @@ const listConfig: ListConfig = {
     paymentFileId: { column: 'b.ap_batch_payment_file_id', type: 'number' },
     interfaceId: { column: 'b.interface_id', type: 'number' },
     interfaceName: { column: 'i.InterfaceName', type: 'string' },
+    runLogId: { column: 'b.run_log_id', type: 'number' },
     status: {
       column: 'b.ap_batch_status',
       type: 'enum',
       values: ['New', 'Success', 'Failure'],
     },
+    client: { column: 'b.client', type: 'string' },
+    currency: { column: 'b.currency', type: 'string' },
+    apCreatedDate: { column: 'b.ap_created_date', type: 'date' },
     processedDate: { column: 'b.processed_date', type: 'date' },
     invoiceProcessUuid: { column: 'b.invoice_process_uuid', type: 'string' },
   },
@@ -30,8 +34,9 @@ export function listBatches(req: Request) {
   return runList<RowDataPacket>(req, listConfig, {
     selectSql: `
       SELECT b.id, b.ap_batch_name, b.ap_batch_payment_file_id, b.interface_id,
-             i.InterfaceName AS interface_name,
-             b.ap_batch_status, b.processed_date, b.invoice_process_uuid,
+             i.InterfaceName AS interface_name, b.run_log_id,
+             b.ap_batch_status, b.client, b.currency, b.no_of_invoices, b.no_of_vendors,
+             b.invoice_amount, b.ap_created_date, b.processed_date, b.invoice_process_uuid,
              (SELECT COUNT(*) FROM ap_invoices ai WHERE ai.ap_paymentfile_id = b.id) AS invoice_count,
              (SELECT COUNT(*) FROM ap_invoices ai
                 WHERE ai.ap_paymentfile_id = b.id AND ai.ap_invoice_api_status = 'FAILED') AS invoice_failed_count`,

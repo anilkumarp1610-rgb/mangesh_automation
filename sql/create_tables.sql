@@ -75,6 +75,27 @@ CREATE TABLE IF NOT EXISTS ap_invoices (
     KEY ix_ap_invoices_paymentfile_id (ap_paymentfile_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
+-- 0a-0. AP Run Log (one row per process_invoices.py invocation, inserted and
+-- committed on its own at the very start of main() -- before interface config
+-- is loaded, before auth, before anything else -- so it survives even if the
+-- run fails later. Captures exactly what was passed on the CLI: interface_id
+-- always, plus either from_date/to_date, or ap_batch_name (--ap-batch-name),
+-- or neither (default GetPaymentBatches.LookbackDays window) -- whichever
+-- weren't used stay NULL. ap_payment_file_details.run_log_id below ties every
+-- batch pulled in a run back to this row; every deeper table (ap_batch_invoice_
+-- details, ap_invoices, invoice_summary/detail/line_detail/service/charge, etc.)
+-- is already reachable from ap_payment_file_details via existing FKs, so this
+-- is the only place run_log_id needs to live.
+CREATE TABLE IF NOT EXISTS ap_run_log (
+    id                          BIGINT AUTO_INCREMENT PRIMARY KEY,
+    interface_id                INT NOT NULL,
+    from_date                   DATETIME,
+    to_date                     DATETIME,
+    ap_batch_name               VARCHAR(200),
+    started_at                  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    KEY ix_run_log_interface_id (interface_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
 -- 0a. AP Payment File Details (one row per payment-file batch; ap_batch_status
 -- drives the foreach loop in process_invoices.py -- 'New' rows for a given
 -- interface are processed, then flipped to 'Success'/'Failure').
@@ -91,7 +112,10 @@ CREATE TABLE IF NOT EXISTS ap_invoices (
 -- the current run's UUID (formerly a separate ap_invoices_process_log table,
 -- one row per run, referenced via a log_id FK -- merged in since a batch is
 -- only ever processed by one run at a time; see
--- sql/migrate_merge_ap_invoices_process_log.sql).
+-- sql/migrate_merge_ap_invoices_process_log.sql). run_log_id points back to
+-- the ap_run_log row for the process_invoices.py run that pulled this batch
+-- (see ap_run_log above) -- nullable since rows inserted before this column
+-- existed have no run to point to.
 CREATE TABLE IF NOT EXISTS ap_payment_file_details (
     id                          INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
     ap_batch_name               VARCHAR(45),
@@ -111,7 +135,40 @@ CREATE TABLE IF NOT EXISTS ap_payment_file_details (
     allocated_amount               DECIMAL(18,2),
     detail_invoice_amount          DECIMAL(18,2),
     fetched_datetime               DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    KEY ix_payment_file_interface_status (interface_id, ap_batch_status)
+    run_log_id                     BIGINT,
+    KEY ix_payment_file_interface_status (interface_id, ap_batch_status),
+    CONSTRAINT fk_payment_file_run_log FOREIGN KEY (run_log_id)
+        REFERENCES ap_run_log (id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- 0a-0a. AP Process Log (console-only logging is mirrored here by
+-- db_log_handler.DbLogHandler, attached to the root logger once run_log_id is
+-- known -- see process_invoices.py::main(). Every record from every module
+-- (auth_client, invoice_client, sync_payment_files, repository,
+-- process_invoices, etc.) lands here, tagged with the run (run_log_id, always)
+-- and, when emitted from inside a batch's processing block, that batch
+-- (ap_payment_file_detail_id, NULL for run-level lines -- see log_context.py).
+-- ap_payment_file_detail_id deliberately has NO foreign key: DbLogHandler
+-- writes from its own separate, autocommit connection, while the batch's
+-- ap_payment_file_details row sits uncommitted on the main transaction for the
+-- whole duration of sync_payment_files() -- an FK here would force every log
+-- insert tagged with that batch to wait on the uncommitted parent row's lock
+-- for the full innodb_lock_wait_timeout (default 50s) before failing, once per
+-- log line, for that batch's entire processing window. run_log_id keeps its
+-- FK since ap_run_log is always committed (on its own, immediately) before
+-- DbLogHandler is even attached -- no cross-connection wait there.
+CREATE TABLE IF NOT EXISTS ap_process_log (
+    id                          BIGINT AUTO_INCREMENT PRIMARY KEY,
+    run_log_id                  BIGINT NOT NULL,
+    ap_payment_file_detail_id   INT,
+    log_level                   VARCHAR(10) NOT NULL,
+    logger_name                 VARCHAR(100),
+    message                     TEXT NOT NULL,
+    created_datetime            DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+    KEY ix_process_log_run_log_id (run_log_id),
+    KEY ix_process_log_payment_file_detail_id (ap_payment_file_detail_id),
+    CONSTRAINT fk_process_log_run_log FOREIGN KEY (run_log_id)
+        REFERENCES ap_run_log (id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 -- 0a-i. AP Batch Invoice Details (raw response of the Get Invoice List API --

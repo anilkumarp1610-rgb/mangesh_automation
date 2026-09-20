@@ -34,6 +34,22 @@ def build_export_filename(
     return f"{cfg.job.output_prefix}_{stamped}" if cfg.job.output_prefix else stamped
 
 
+def build_ap_batch_filename(template: str, ap_batch_date) -> str:
+    """Resolves interfaceconfiguration.Email_Attachment_FileName (e.g.
+    "CBTS_{ap_batch_date}") against one payment file's ap_created_date,
+    formatted mmddyyyy (e.g. "CBTS_09012026"). Falls back to today's date,
+    logged as a warning, if ap_created_date is missing for that batch (the
+    upstream API record didn't carry one). Appends .csv if the template
+    doesn't already end in an extension."""
+    if not ap_batch_date:
+        logger.warning(
+            "build_ap_batch_filename: no ap_created_date for this batch -- falling back to today's date"
+        )
+        ap_batch_date = datetime.now()
+    name = template.format(ap_batch_date=ap_batch_date.strftime("%m%d%Y"))
+    return name if os.path.splitext(name)[1] else f"{name}.csv"
+
+
 def resolve_output_path(cfg: AppConfig, filename: str | None = None) -> str:
     folder = cfg.output.folder
     if not os.path.isabs(folder):
@@ -103,8 +119,56 @@ def export_invoices_csv(
         engine.dispose()
 
     output_path = resolve_output_path(cfg, build_export_filename(cfg, suffix=filename_suffix))
-    export_df.to_csv(output_path, index=False)
+    export_df.to_csv(output_path, index=False, header=cfg.output.include_header)
     logger.info("Export: wrote %d row(s) to %s", len(export_df), output_path)
+    return output_path
+
+
+def export_ap_batch_csv(cfg: AppConfig, payment_file_detail_id: int, ap_batch_date) -> str:
+    """AP output CSV for one payment-file batch, driven by
+    interfaceconfiguration.Platform_DB_AP_Query (cfg.platform_db_ap_query)
+    instead of Output.Tables -- the join/GROUP BY over ap_batch_invoice_details
+    + ap_batch_invoice_allocation_values, parameterized by
+    %(ap_payment_file_detail_id)s so the CSV only covers this batch. The
+    filename comes from interfaceconfiguration.Email_Attachment_FileName
+    (cfg.email.attachment.file_name), resolved against this batch's
+    ap_created_date (see build_ap_batch_filename). Whether the CSV's first
+    row is a header comes from interfaceconfiguration.IncludeHeader
+    (cfg.output.include_header, default True)."""
+    if not cfg.platform_db_ap_query:
+        logger.error(
+            "AP batch export: interfaceconfiguration.Platform_DB_AP_Query is not set for "
+            "this interface (ap_payment_file_detail_id=%s)",
+            payment_file_detail_id,
+        )
+        raise RuntimeError(
+            "interfaceconfiguration.Platform_DB_AP_Query is not set for this interface -- "
+            "the AP output CSV query is required to generate the export"
+        )
+
+    logger.info(
+        "AP batch export: running Platform_DB_AP_Query for ap_payment_file_detail_id=%s",
+        payment_file_detail_id,
+    )
+    engine = get_engine(cfg.mysql)
+    try:
+        export_df = pd.read_sql(
+            cfg.platform_db_ap_query,
+            engine,
+            params={"ap_payment_file_detail_id": payment_file_detail_id},
+        )
+    finally:
+        engine.dispose()
+
+    filename = build_ap_batch_filename(cfg.email.attachment.file_name, ap_batch_date)
+    output_path = resolve_output_path(cfg, filename)
+    export_df.to_csv(output_path, index=False, header=cfg.output.include_header)
+    logger.info(
+        "AP batch export: wrote %d row(s) to %s (ap_payment_file_detail_id=%s)",
+        len(export_df),
+        output_path,
+        payment_file_detail_id,
+    )
     return output_path
 
 
