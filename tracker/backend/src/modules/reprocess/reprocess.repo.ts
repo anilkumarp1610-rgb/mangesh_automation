@@ -71,17 +71,30 @@ export async function reprocessBatch(batchId: number): Promise<{ runLogId: numbe
 
   logger.info({ batchId, interfaceId, apBatchName, cwd }, 'reprocess: spawning pipeline');
 
+  // Set synchronously if spawn() fails outright (e.g. PIPELINE_PYTHON_EXECUTABLE
+  // not found -- ENOENT); the 'error' event fires asynchronously, typically
+  // within a few ms, so the poll loop below checks it on every iteration
+  // instead of only discovering the failure after the full timeout elapses.
+  let spawnError: Error | null = null;
   const child = spawn(env.PIPELINE_PYTHON_EXECUTABLE, args, {
     cwd,
     stdio: 'ignore', // the pipeline's own logging goes to ap_process_log, not this process's stdio
   });
   child.unref(); // don't let this child keep the Node event loop / this request alive
   child.on('error', (err) => {
+    spawnError = err;
     logger.error({ err, batchId, interfaceId, apBatchName }, 'reprocess: failed to spawn pipeline process');
   });
 
   const deadline = Date.now() + env.PIPELINE_TRIGGER_POLL_TIMEOUT_MS;
   while (Date.now() < deadline) {
+    if (spawnError) {
+      const err = spawnError as Error;
+      throw new UpstreamError(
+        `Failed to start the pipeline (${env.PIPELINE_PYTHON_EXECUTABLE} ${args.join(' ')} in ${cwd}): ` +
+          `${err.message}. Check PIPELINE_PYTHON_EXECUTABLE/PIPELINE_SCRIPTS_DIR in the backend's .env.`,
+      );
+    }
     const runLog = await queryOne<RowDataPacket & { id: number }>(
       `SELECT id FROM ap_run_log
         WHERE interface_id = ? AND ap_batch_name = ? AND id > ?
