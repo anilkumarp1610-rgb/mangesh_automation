@@ -1,22 +1,15 @@
 import logging
 import os
 from datetime import datetime
-from urllib.parse import quote_plus
 
 import pandas as pd
-from sqlalchemy import create_engine
 
-from config import AppConfig, ExportTableConfig, MySqlConfig, load_config
+from config import AppConfig, ExportTableConfig, load_config
+from db import get_engine
 
 logger = logging.getLogger(__name__)
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-
-
-def get_engine(cfg: MySqlConfig):
-    return create_engine(
-        f"mysql+mysqlconnector://{cfg.user}:{quote_plus(cfg.password)}@{cfg.host}/{cfg.database}"
-    )
 
 
 def build_export_filename(
@@ -110,13 +103,10 @@ def export_invoices_csv(
     filename_suffix: str | None = None,
 ) -> str:
     cfg = cfg or load_config()
-    engine = get_engine(cfg.mysql)
-    try:
-        export_df = build_invoice_export(
-            engine, cfg.output.tables, invoice_process_uuid=invoice_process_uuid
-        )
-    finally:
-        engine.dispose()
+    engine = get_engine(cfg.mysql)  # shared pool; disposed by the caller's process
+    export_df = build_invoice_export(
+        engine, cfg.output.tables, invoice_process_uuid=invoice_process_uuid
+    )
 
     output_path = resolve_output_path(cfg, build_export_filename(cfg, suffix=filename_suffix))
     export_df.to_csv(output_path, index=False, header=cfg.output.include_header)
@@ -150,15 +140,11 @@ def export_ap_batch_csv(cfg: AppConfig, payment_file_detail_id: int, ap_batch_da
         "AP batch export: running Platform_DB_AP_Query for ap_payment_file_detail_id=%s",
         payment_file_detail_id,
     )
-    engine = get_engine(cfg.mysql)
-    try:
-        export_df = pd.read_sql(
-            cfg.platform_db_ap_query,
-            engine,
-            params={"ap_payment_file_detail_id": payment_file_detail_id},
-        )
-    finally:
-        engine.dispose()
+    export_df = pd.read_sql(
+        cfg.platform_db_ap_query,
+        get_engine(cfg.mysql),  # shared pool -- connection is returned, not closed
+        params={"ap_payment_file_detail_id": payment_file_detail_id},
+    )
 
     filename = build_ap_batch_filename(cfg.email.attachment.file_name, ap_batch_date)
     output_path = resolve_output_path(cfg, filename)

@@ -199,6 +199,38 @@ def insert_run_log(
     return run_log_id
 
 
+def save_run_payment_batches_response(cursor: MySQLCursor, run_log_id: int, batch_records: list) -> None:
+    """Stores the records the Get Payment Batches API returned for this run (all
+    pages combined, as a JSON array) on its ap_run_log row -- an audit trail of
+    exactly which payment files the run saw, even if it fails afterwards."""
+    cursor.execute(
+        "UPDATE ap_run_log SET payment_batches_response = %s WHERE id = %s",
+        (json.dumps(batch_records, default=str), run_log_id),
+    )
+    logger.debug(
+        "ap_run_log: saved payment_batches_response (%d record(s)) for id=%s",
+        len(batch_records),
+        run_log_id,
+    )
+
+
+def save_payment_file_invoice_list_response(
+    cursor: MySQLCursor, payment_file_detail_id: int, detail_records: list
+) -> None:
+    """Stores the records the Get Invoice List API returned for one payment file
+    (all pages combined, as a JSON array) on its ap_payment_file_details row, so
+    the raw response survives alongside the parsed ap_batch_invoice_* rows."""
+    cursor.execute(
+        "UPDATE ap_payment_file_details SET invoice_list_response = %s WHERE id = %s",
+        (json.dumps(detail_records, default=str), payment_file_detail_id),
+    )
+    logger.debug(
+        "ap_payment_file_details: saved invoice_list_response (%d record(s)) for id=%s",
+        len(detail_records),
+        payment_file_detail_id,
+    )
+
+
 def insert_payment_file(
     cursor: MySQLCursor,
     interface_id: int,

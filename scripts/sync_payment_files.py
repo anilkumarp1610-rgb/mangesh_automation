@@ -10,6 +10,8 @@ from repository import (
     insert_batch_invoice_custom,
     insert_batch_invoice_detail,
     insert_payment_file,
+    save_payment_file_invoice_list_response,
+    save_run_payment_batches_response,
 )
 
 logger = logging.getLogger(__name__)
@@ -78,6 +80,7 @@ def sync_payment_files(
     to_date=None,
     ap_batch_name: str = None,
     run_log_id: int = None,
+    conn=None,
 ) -> list:
     """Step 1: pull every payment-file batch the upstream API returns for the
     configured date window (or the single named batch, see ap_batch_name below)
@@ -108,7 +111,9 @@ def sync_payment_files(
 
     run_log_id ties every ap_payment_file_details row inserted this run back to
     the ap_run_log row main() created at the start of the run (see
-    repository.insert_run_log)."""
+    repository.insert_run_log). The raw API records are also saved on that row
+    (ap_run_log.payment_batches_response); pass conn to commit that save
+    immediately."""
     if ap_batch_name:
         logger.info(
             "Payment file sync: pulling payment batch %r for InterfaceId=%s",
@@ -141,6 +146,13 @@ def sync_payment_files(
             "Get Payment Batches API",
         )
     logger.info("Payment file sync: %d payment batch record(s) returned", len(batch_records))
+
+    if run_log_id is not None:
+        # Committed straight away (when conn is given) so the payload survives even
+        # if inserting the batches below fails and main() rolls back.
+        save_run_payment_batches_response(cursor, run_log_id, batch_records)
+        if conn is not None:
+            conn.commit()
 
     new_payment_file_detail_ids = []
 
@@ -176,6 +188,8 @@ def sync_payment_files(
                 len(detail_records),
                 batch_name,
             )
+
+            save_payment_file_invoice_list_response(cursor, payment_file_detail_id, detail_records)
 
             if detail_records:
                 logger.debug(

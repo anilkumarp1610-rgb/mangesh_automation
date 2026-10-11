@@ -5,7 +5,7 @@ from datetime import date, datetime
 
 from auth_client import authenticate
 from config import load_config
-from db import get_connection
+from db import dispose_engines, get_connection
 from db_log_handler import DbLogHandler
 from delivery import send_no_batch_email, send_run_summary_email, upload_to_sftp
 from export_invoices_csv import export_ap_batch_csv
@@ -399,6 +399,7 @@ def main(
                 to_date=to_date,
                 ap_batch_name=ap_batch_name,
                 run_log_id=run_log_id,
+                conn=conn,
             )
             conn.commit()
             logger.info(
@@ -485,6 +486,7 @@ def main(
         logger.info("=== process_invoices run finished for InterfaceId=%s ===", interface_id)
         logging.getLogger().removeHandler(db_log_handler)
         db_log_handler.close()
+        dispose_engines()
 
 
 if __name__ == "__main__":

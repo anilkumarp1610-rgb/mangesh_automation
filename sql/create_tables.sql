@@ -79,6 +79,7 @@ CREATE TABLE IF NOT EXISTS ap_run_log (
     from_date                   DATETIME,
     to_date                     DATETIME,
     ap_batch_name               VARCHAR(200),
+    payment_batches_response    JSON,
     started_at                  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     KEY ix_run_log_interface_id (interface_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
@@ -139,6 +140,7 @@ CREATE TABLE IF NOT EXISTS ap_payment_file_details (
     allocated_amount               DECIMAL(18,2),
     detail_invoice_amount          DECIMAL(18,2),
     fetched_datetime               DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    invoice_list_response          JSON,
     run_log_id                     BIGINT,
     KEY ix_payment_file_interface_status (interface_id, ap_batch_status),
     CONSTRAINT fk_payment_file_run_log FOREIGN KEY (run_log_id)

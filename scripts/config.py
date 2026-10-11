@@ -20,6 +20,7 @@ class MySqlConfig:
     user: str
     password: str
     database: str
+    pool_size: int = 5  # MySql.PoolSize -- see db.py
 
 
 @dataclass
@@ -206,6 +207,7 @@ def load_config(path: str = APPSETTINGS_PATH, interface_values: dict | None = No
             user=mysql_raw["User"],
             password=mysql_raw["Password"],
             database=mysql_raw["Database"],
+            pool_size=int(mysql_raw.get("PoolSize", 5)),
         ),
         invoice_api=InvoiceApiConfig(
             base_uri=api_raw["BaseUri"],
