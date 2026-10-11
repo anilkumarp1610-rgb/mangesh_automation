@@ -16,7 +16,7 @@ It does **not** shell out — it imports `process_invoices.main` and calls
 | 1 | Put the **whole repo** on the Airflow host (not just the DAG file) | `git clone` / release tarball |
 | 2 | Install Python deps into the Airflow environment | `pip install -r requirements.txt` |
 | 3 | Create the DB schema **from `sql/create_tables.sql`** | see §3 |
-| 4 | Point `config/appsettings.yml` → `MySql` at that database | see §4 |
+| 4 | Set the `MYSQL_*` environment (or env file) for that database, plus `INTERFACE_SECRET_KEY` | see §4 |
 | 5 | Insert / verify the `interfaceconfiguration` row | see §5 |
 | 6 | Seed `ap_payment_file_details` (`ap_batch_status='New'`) + `ap_invoices` | see §5 |
 | 7 | Make the DAG discoverable (`dags_folder`) | see §6 |
@@ -99,28 +99,41 @@ export and is **not** the source of truth. See §9.
 
 ---
 
-## 4. `config/appsettings.yml`
+## 4. Environment (`MYSQL_*`) and `config/appsettings.yml`
 
-Only the `MySql` block is environment-specific for deployment. Everything under
-`Sftp` / `Email` / `InvoiceApi.Authentication` is sourced per-interface from the
-`interfaceconfiguration` table (§5); the YAML only holds fallbacks.
+The database connection and the secret key are **not** in `appsettings.yml`.
+They are environment variables, which must be present for the Airflow
+**scheduler and worker** processes (restart them after changing):
 
-```yaml
-MySql:
-  Host: <db-host>          # e.g. 10.x.x.x  (NOT localhost, unless MySQL is on the Airflow host)
-  User: <db-user>
-  Password: <db-password>
-  Database: <db-name>      # must match the schema you created in §3
+```bash
+MYSQL_HOST=<db-host>          # e.g. 10.x.x.x  (NOT localhost, unless MySQL is on the Airflow host)
+MYSQL_PORT=3306               # optional
+MYSQL_USER=<db-user>
+MYSQL_PASSWORD=<db-password>
+MYSQL_DATABASE=<db-name>      # must match the schema you created in §3
+MYSQL_POOL_SIZE=5             # optional
+INTERFACE_SECRET_KEY=<same value as the tracker backend>   # decrypts Platform_Password / Platform_AppAuthKey etc.
 ```
 
+Easiest: put them in one file with `chmod 600` and either point
+`PIPELINE_ENV_FILE=/path/to/that.env` at it for the Airflow services, or let the
+pipeline use the default, `.env` in the project folder next to `scripts/` (independent of the tracker).
+Real environment variables always win over the file. Under systemd use
+`EnvironmentFile=` in the scheduler/worker units. An Airflow Variable does
+**not** work — the code reads `os.environ`.
+
+`appsettings.yml` only holds the Invoice API endpoints and `Logging.Level`.
+Everything under `Sftp` / `Email` is sourced per-interface from the
+`interfaceconfiguration` table (§5); the YAML only holds fallbacks. The Invoice
+API login (`Platform_UserId`, `Platform_Password`, `Platform_AppAuthKey`) comes
+only from the interface row.
+
 Notes:
-- The `MySql` block is **not** `${ENV_VAR}`-expanded (only `Sftp`/`Email` are).
-  Put literal values here, or manage this file with your config tooling.
-- `Logging.Folder` and `Output.Folder` may be relative (resolved against the repo
-  root) or absolute. On Airflow, prefer **absolute** paths the worker can write
-  to, e.g. `/opt/airflow/invoice-sync/logs` and `/opt/airflow/invoice-sync/output`.
-- Passwords containing `@` are handled by `mysql.connector`; no encoding needed
-  in this file.
+- `interfaceconfiguration.Output_Directory` is **required**: the preflight and
+  the run fail at the start if it is empty. Prefer an **absolute** path the
+  worker can write to, e.g. `/opt/airflow/invoice-sync/output`.
+- CSV files are named `<InterfaceName>_<mmddyyyy>.csv` unless
+  `Email_Attachment_FileName` is set as an override template.
 
 ---
 

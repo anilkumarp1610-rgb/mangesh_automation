@@ -20,7 +20,7 @@ import { env } from '../src/config/env.js';
 import { logger } from '../src/lib/logger.js';
 
 const CHECK_ONLY = process.argv.includes('--check');
-const DB = env.DB_NAME;
+const DB = env.MYSQL_DATABASE;
 
 async function q<T extends RowDataPacket>(sql: string, params: unknown[] = []): Promise<T[]> {
   const [rows] = await pool.query<T[]>(sql, params);

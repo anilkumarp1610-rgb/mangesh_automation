@@ -1,0 +1,32 @@
+#!/bin/sh
+# Keeps docs/VERSION_HISTORY.md current:
+#   1. Blocks the commit unless the doc is staged (so every commit has an entry).
+#   2. Fills in the commit id of the previous commit's entry. A commit can't
+#      contain its own id, so each entry is written with `pending` and this hook
+#      replaces it with the id of HEAD (the commit that introduced the entry)
+#      when the next commit is made.
+# Enable once per clone:  git config core.hooksPath .githooks
+# Skip in an emergency:    SKIP_VERSION_CHECK=1 git commit ...   (or --no-verify)
+DOC="docs/VERSION_HISTORY.md"
+
+[ -n "$SKIP_VERSION_CHECK" ] && exit 0
+
+if ! git diff --cached --name-only | grep -qx "$DOC"; then
+  echo "Commit blocked: $DOC is not staged." >&2
+  echo "Add a new entry at the top (version, commit date, functional + technical changes)," >&2
+  echo "then:  git add $DOC" >&2
+  exit 1
+fi
+
+# Entries from the previous commit still marked `pending` get that commit's id.
+if git rev-parse -q --verify HEAD >/dev/null 2>&1; then
+  head_id=$(git rev-parse --short HEAD)
+  git show "HEAD:$DOC" 2>/dev/null | grep -E '^## v[0-9.]+ .* `pending` ' | \
+    sed -E 's/^## (v[0-9.]+) .*/\1/' | while read -r ver; do
+      esc=$(printf '%s' "$ver" | sed 's/\./\./g')
+      sed -i -E "s/^(## ${esc} .* )\`pending\`( .*)/\1\`${head_id}\`\2/" "$DOC"
+      echo "VERSION_HISTORY: $ver -> $head_id"
+    done
+  git add "$DOC"
+fi
+exit 0

@@ -3,14 +3,19 @@ import re
 from dataclasses import dataclass, field
 
 import yaml
+from dotenv import load_dotenv
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 APPSETTINGS_PATH = os.path.join(PROJECT_ROOT, "config", "appsettings.yml")
+# The pipeline's own env file (MYSQL_* settings and INTERFACE_SECRET_KEY), kept at
+# the project root -- independent of the tracker. PIPELINE_ENV_FILE points at a
+# different file (e.g. on the Airflow server); real environment variables always
+# win over the file.
+DEFAULT_ENV_FILE = os.path.join(PROJECT_ROOT, ".env")
 
 
 @dataclass
 class LoggingConfig:
-    folder: str
     level: str
 
 
@@ -20,7 +25,8 @@ class MySqlConfig:
     user: str
     password: str
     database: str
-    pool_size: int = 5  # MySql.PoolSize -- see db.py
+    port: int = 3306
+    pool_size: int = 5  # MYSQL_POOL_SIZE -- see db.py
 
 
 @dataclass
@@ -63,20 +69,13 @@ class InvoiceApiConfig:
 
 
 @dataclass
-class ExportTableConfig:
-    name: str
-    join_on: str | None
-    query: str
-
-
-@dataclass
 class OutputConfig:
-    folder: str
-    file_name: str
-    tables: list[ExportTableConfig] = field(default_factory=list)
-    # Sourced from interfaceconfiguration.IncludeHeader (see
-    # repository.py::load_interface_configuration) -- whether the generated
-    # CSV's first row is a header row. Defaults true (include the header).
+    # Both sourced from interfaceconfiguration (see
+    # repository.py::load_interface_configuration), not from appsettings.yml:
+    # Output_Directory -> folder ("" until the interface row is loaded; main()
+    # refuses to run without it) and IncludeHeader -> include_header (whether
+    # the generated CSV's first row is a header row; defaults true).
+    folder: str = ""
     include_header: bool = True
 
 
@@ -166,6 +165,31 @@ def _set_nested(raw: dict, key: str, value) -> None:
     target[parts[-1]] = value
 
 
+def _load_mysql_config() -> MySqlConfig:
+    """DB connection settings come from MYSQL_* environment variables (loaded from
+    the env file first, see DEFAULT_ENV_FILE) -- never from appsettings.yml."""
+    load_dotenv(os.environ.get("PIPELINE_ENV_FILE") or DEFAULT_ENV_FILE, override=False)
+    missing = [
+        name
+        for name in ("MYSQL_HOST", "MYSQL_USER", "MYSQL_PASSWORD", "MYSQL_DATABASE")
+        if not os.environ.get(name)
+    ]
+    if missing:
+        raise RuntimeError(
+            f"Missing environment variable(s): {', '.join(missing)}. Set them in the "
+            f"environment, or in the env file ({os.environ.get('PIPELINE_ENV_FILE') or DEFAULT_ENV_FILE}; "
+            "override the path with PIPELINE_ENV_FILE)."
+        )
+    return MySqlConfig(
+        host=os.environ["MYSQL_HOST"],
+        user=os.environ["MYSQL_USER"],
+        password=os.environ["MYSQL_PASSWORD"],
+        database=os.environ["MYSQL_DATABASE"],
+        port=int(os.environ.get("MYSQL_PORT") or 3306),
+        pool_size=int(os.environ.get("MYSQL_POOL_SIZE") or 5),
+    )
+
+
 def load_config(path: str = APPSETTINGS_PATH, interface_values: dict | None = None) -> AppConfig:
     with open(path, "r", encoding="utf-8") as f:
         raw = yaml.safe_load(f)
@@ -177,13 +201,12 @@ def load_config(path: str = APPSETTINGS_PATH, interface_values: dict | None = No
         return _expand_env(raw.get(name, {}))
 
     logging_raw = raw.get("Logging", {})
-    mysql_raw = raw["MySql"]
     api_raw = raw["InvoiceApi"]
     auth_raw = api_raw["Authentication"]
     get_invoice_raw = api_raw["GetInvoice"]
     get_payment_batches_raw = api_raw.get("GetPaymentBatches", {})
     get_invoice_list_raw = api_raw.get("GetInvoiceList", {})
-    output_raw = raw["Output"]
+    output_raw = raw.get("Output", {})
     # Not hardcoded to one interface: repository.py::load_interface_configuration
     # overlays interfaceconfiguration.InterfaceName onto Job.OutputPrefix, so this
     # resolves per whichever --interface-id is actually running.
@@ -198,17 +221,8 @@ def load_config(path: str = APPSETTINGS_PATH, interface_values: dict | None = No
     failure_raw = email_raw.get("FailureNotification", {})
 
     return AppConfig(
-        logging=LoggingConfig(
-            folder=logging_raw.get("Folder", "logs"),
-            level=logging_raw.get("Level", "INFO"),
-        ),
-        mysql=MySqlConfig(
-            host=mysql_raw["Host"],
-            user=mysql_raw["User"],
-            password=mysql_raw["Password"],
-            database=mysql_raw["Database"],
-            pool_size=int(mysql_raw.get("PoolSize", 5)),
-        ),
+        logging=LoggingConfig(level=logging_raw.get("Level", "INFO")),
+        mysql=_load_mysql_config(),
         invoice_api=InvoiceApiConfig(
             base_uri=api_raw["BaseUri"],
             authentication=AuthenticationConfig(
@@ -235,16 +249,7 @@ def load_config(path: str = APPSETTINGS_PATH, interface_values: dict | None = No
             ),
         ),
         output=OutputConfig(
-            folder=output_raw["Folder"],
-            file_name=output_raw["FileName"],
-            tables=[
-                ExportTableConfig(
-                    name=t["Name"],
-                    join_on=t.get("JoinOn"),
-                    query=t.get("Query") or f"SELECT * FROM {t['Name']}",
-                )
-                for t in output_raw.get("Tables", [])
-            ],
+            folder=output_raw.get("Folder", ""),
             include_header=output_raw.get("IncludeHeader", True),
         ),
         job=JobConfig(output_prefix=job_raw.get("OutputPrefix", "")),
@@ -271,7 +276,7 @@ def load_config(path: str = APPSETTINGS_PATH, interface_values: dict | None = No
             body=email_raw.get("Body", ""),
             attachment=AttachmentConfig(
                 enabled=attachment_raw.get("Enabled", False),
-                file_name=attachment_raw.get("FileName", "{filename}"),
+                file_name=attachment_raw.get("FileName", ""),
             ),
             failure_notification=FailureNotificationConfig(
                 enabled=failure_raw.get("Enabled", False),

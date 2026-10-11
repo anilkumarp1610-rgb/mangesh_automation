@@ -5,7 +5,8 @@ used by everything: the pipeline's business connection (get_connection), the
 log handler's dedicated connection, and the pandas CSV exports (get_engine).
 Closing a connection returns it to the pool instead of dropping it.
 
-Pool settings: size from MySql.PoolSize (default 5), pool_pre_ping to replace
+Connection settings come from the MYSQL_* environment (see config.py). Pool
+settings: size from MYSQL_POOL_SIZE (default 5), pool_pre_ping to replace
 connections the server has dropped, pool_recycle so none outlives MySQL's
 wait_timeout. A run needs 3 at once (main + log handler + a CSV export).
 """
@@ -24,13 +25,13 @@ _lock = threading.Lock()
 
 
 def get_engine(cfg: MySqlConfig) -> Engine:
-    key = (cfg.host, cfg.user, cfg.database)
+    key = (cfg.host, cfg.port, cfg.user, cfg.database)
     with _lock:
         engine = _engines.get(key)
         if engine is None:
             engine = create_engine(
                 f"mysql+mysqlconnector://{cfg.user}:{quote_plus(cfg.password)}"
-                f"@{cfg.host}/{cfg.database}",
+                f"@{cfg.host}:{cfg.port}/{cfg.database}",
                 pool_size=cfg.pool_size,
                 max_overflow=0,
                 pool_pre_ping=True,

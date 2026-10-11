@@ -372,6 +372,11 @@ def main(
             )
             interface_values = load_interface_configuration(cursor, interface_id)
             cfg = load_config(interface_values=interface_values)
+            if not cfg.output.folder:
+                raise ValueError(
+                    f"interfaceconfiguration.Output_Directory is not set for InterfaceId={interface_id} "
+                    "-- set it before running (the AP output CSVs are written there)"
+                )
             logger.info("Step 1-2: interface configuration loaded")
 
             logger.info("Authenticating against %s", cfg.invoice_api.base_uri)

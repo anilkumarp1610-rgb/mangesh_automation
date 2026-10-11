@@ -1,0 +1,10 @@
+
+
+# --- Before you commit (lines starting with # are ignored) ---------------
+# [ ] docs/VERSION_HISTORY.md: new entry at the top, staged
+#       heading:  ## v1.<n>.0 — `pending` — YYYY-MM-DD
+#       Functional (what users/operators see), Technical (code, schema,
+#       config), Deploy steps, Known limits
+# [ ] Files listed under "Unreleased" moved into this entry if committed now
+# [ ] New columns/tables: create_tables.sql AND a re-runnable ALTER script
+# The hook fills in the previous entry's commit id automatically.

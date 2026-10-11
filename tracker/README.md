@@ -31,7 +31,7 @@ tracker/
 ```bash
 cd backend
 npm install
-cp .env.example .env         # fill in DB_* / INTERFACE_SECRET_KEY / AIRFLOW_*
+cp .env.example .env         # fill in MYSQL_* / INTERFACE_SECRET_KEY / AIRFLOW_*
 npm run migrate              # applies tracker/backend/migrations/*.sql once
 npm run align-db             # reconcile the live DB with the repo SQL scripts (idempotent)
 npm run dev                  # http://localhost:4000  (GET /api/health)

@@ -3,12 +3,12 @@ import { env } from '../config/env.js';
 import { logger } from '../lib/logger.js';
 
 export const pool: Pool = mysql.createPool({
-  host: env.DB_HOST,
-  port: env.DB_PORT,
-  user: env.DB_USER,
-  password: env.DB_PASSWORD,
-  database: env.DB_NAME,
-  connectionLimit: env.DB_CONNECTION_LIMIT,
+  host: env.MYSQL_HOST,
+  port: env.MYSQL_PORT,
+  user: env.MYSQL_USER,
+  password: env.MYSQL_PASSWORD,
+  database: env.MYSQL_DATABASE,
+  connectionLimit: env.MYSQL_CONNECTION_LIMIT,
   waitForConnections: true,
   enableKeepAlive: true,
   dateStrings: true, // return DATETIME as strings; the frontend formats them
@@ -59,7 +59,7 @@ export async function assertDbReachable(): Promise<void> {
   const conn = await pool.getConnection();
   try {
     await conn.ping();
-    logger.info({ host: env.DB_HOST, db: env.DB_NAME }, 'Connected to MySQL');
+    logger.info({ host: env.MYSQL_HOST, db: env.MYSQL_DATABASE }, 'Connected to MySQL');
   } finally {
     conn.release();
   }

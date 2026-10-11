@@ -43,7 +43,7 @@ on demand — see [§9](#9-ap-tracker-web-app) and [`tracker/README.md`](tracker
   - [7.5 Run the pipeline directly](#75-run-the-pipeline-directly)
   - [7.6 Run the pipeline via Airflow](#76-run-the-pipeline-via-airflow)
   - [7.7 Ad hoc data inspection](#77-ad-hoc-data-inspection)
-  - [7.8 Export all invoice data to CSV standalone (no run scoping)](#78-export-all-invoice-data-to-csv-standalone-no-run-scoping)
+  - [7.8 (removed)](#78-removed)
   - [7.9 Step-through debugging in VS Code](#79-step-through-debugging-in-vs-code)
 - [8. Technical Notes](#8-technical-notes)
 - [9. AP Tracker (web app)](#9-ap-tracker-web-app)
@@ -76,7 +76,7 @@ flowchart TD
             UPD --> STORE["on SUCCESS: summary → detail →<br/>line_detail → service → charge"]
         end
 
-        LOOP2 --> CSV["Step 6 — Generate AP output CSV<br/><small>Platform_DB_AP_Query, scoped to this batch<br/>filename from Email_Attachment_FileName + ap_created_date</small>"]
+        LOOP2 --> CSV["Step 6 — Generate AP output CSV<br/><small>Platform_DB_AP_Query, scoped to this batch<br/>filename <InterfaceName>_ap_created_date, written to Output_Directory</small>"]
         CSV --> SFTP["Upload to SFTP"]
         SFTP --> STATUS["Update ap_payment_file_details<br/>Success / Failure"]
     end
@@ -97,7 +97,7 @@ each step are:
 2. **Load interface config** — `process_invoices.py --interface-id N` →
    `repository.py::load_interface_configuration()` maps `SFTP_*`/`SMTP_*`/
    `Platform_*`/`Email_*` columns onto `config.py`'s dotted keys, overlaid
-   onto `appsettings.yml` (DB values win; `NULL` columns fall back to YAML).
+   onto `appsettings.yml` (DB values win; `NULL` columns fall back to YAML, except the output folder, which has no YAML default -- see §4).
 3. **Authenticate** (`auth_client.py`) — `POST {BaseUri}/api/v2/Authenticate`
    → Bearer token.
 4. **Step 2a — Sync payment files + invoices from upstream**
@@ -148,8 +148,10 @@ each step are:
    — runs this interface's `interfaceconfiguration.Platform_DB_AP_Query`
    (`cfg.platform_db_ap_query`), parameterized by
    `%(ap_payment_file_detail_id)s` so the CSV only covers this batch; the
-   filename comes from `Email_Attachment_FileName` (e.g. `CBTS_{ap_batch_date}`)
-   resolved against this batch's `ap_created_date` (`mmddyyyy`, see §8), and
+   file is written to the interface's `Output_Directory` (a run refuses to
+   start if it is empty) and named `<InterfaceName>_<mmddyyyy>.csv` from this
+   batch's `ap_created_date` (e.g. `CBTS_AP_09012026.csv`; an optional
+   `Email_Attachment_FileName` template overrides it, see §8), and
    whether it has a header row comes from `IncludeHeader`
    (`cfg.output.include_header`, default `true`). Uploads that file to SFTP.
    `process_payment_file()` returns a result dict (batch name, invoice count,
@@ -182,7 +184,7 @@ mangesh_automation/
 ├── .vscode/
 │   └── launch.json           VS Code debug configurations (see §7.9)
 ├── config/
-│   ├── appsettings.yml       MySQL connection + fallback defaults (see §4)
+│   ├── appsettings.yml       Invoice API endpoints + logging level (DB settings: MYSQL_* env, see §4)
 │   └── field_maps.yml        API field -> DB column mappings
 ├── scripts/
 │   ├── config.py              loads appsettings.yml, overlays interface_values
@@ -197,7 +199,7 @@ mangesh_automation/
 │   ├── sync_payment_files.py  pulls new payment files + invoice numbers from upstream API
 │   ├── process_invoices.py    main orchestrator (entry point)
 │   ├── fetch_ap_invoices.py   standalone ap_invoices reader
-│   ├── export_invoices_csv.py AP output CSV (Platform_DB_AP_Query-driven, per batch) + the older Output.Tables-driven full export (standalone, §7.8)
+│   ├── export_invoices_csv.py AP output CSV (Platform_DB_AP_Query-driven, per batch)
 │   ├── delivery.py            SFTP upload + run-level summary email (see §8)
 │   ├── secret_crypto.py       AES-256-GCM decrypt_secret() for tracker-encrypted interfaceconfiguration secrets (§7.4, §9)
 │   └── make_secret_update_sql.py  prompts for Platform_Password / Platform_AppAuthKey and prints an UPDATE with enc:v1: values (§7.4)
@@ -414,21 +416,21 @@ else does.
 
 | File | Role |
 |---|---|
-| `config/appsettings.yml` | MySQL connection, Invoice API base structure, `Output.Tables` join config, logging — plus fallback `Sftp`/`Email`/`InvoiceApi.Authentication` defaults for any interface whose `interfaceconfiguration` row leaves those columns `NULL` |
+| `config/appsettings.yml` | Invoice API base structure/endpoints and logging level (no DB settings and no output settings — those come from `MYSQL_*` env and `interfaceconfiguration`) — plus fallback `Sftp`/`Email`/`InvoiceApi.Authentication` defaults for any interface whose `interfaceconfiguration` row leaves those columns `NULL` |
 | `config/field_maps.yml` | API field → DB column (snake_case) mappings for Summary / Detail / Service / Charge / BatchDetails / BatchInvoiceDetails / BatchInvoiceAllocationValue / BatchInvoiceCustom. Field-name casing varies by endpoint: `BatchDetails` (the `invoiceAPBatches` batch-list record) is **PascalCase** (`Client`, `PaymentFileId`, `ApBatchName`, `ApCreatedDate`, ... — confirmed against a live response), everything else is camelCase — see §8 |
 | `scripts/config.py` | Loads `config/appsettings.yml` into typed dataclasses (`AppConfig`, `MySqlConfig`, `InvoiceApiConfig`, `AuthenticationConfig`, `GetInvoiceConfig`, `GetPaymentBatchesConfig`, `GetInvoiceListConfig`, `LoggingConfig`, `JobConfig`, `SftpConfig`, `EmailConfig`); `load_config(interface_values=...)` overlays a dict of dotted keys (e.g. `"Sftp.Password"`) on top of the YAML before building the dataclasses |
 | `scripts/logging_config.py` | `setup_logging(cfg)` — console-only root logger setup (no file handler — see `db_log_handler.py` below and §8); exports `LOG_FORMAT` |
 | `scripts/db_log_handler.py` | `DbLogHandler(logging.Handler)` — attached to the root logger once `run_log_id` is known; mirrors every log record (any module, any level) into `ap_process_log`, tagged with `run_log_id` and (via `log_context.py`) the current batch's `ap_payment_file_detail_id` when applicable. Own autocommit connection, never raises out of `emit()` |
 | `scripts/log_context.py` | `current_payment_file_detail_id` — a `contextvars.ContextVar`, set/reset around each batch's processing block in `sync_payment_files.py` and `process_invoices.py::process_payment_file()`, read by `DbLogHandler` |
 | `scripts/field_maps.py` | Loads `config/field_maps.yml`, exposes `SUMMARY_FIELD_MAP` / `DETAIL_FIELD_MAP` / `SERVICE_FIELD_MAP` / `CHARGE_FIELD_MAP` / `BATCH_DETAILS_FIELD_MAP` / `BATCH_INVOICE_DETAIL_FIELD_MAP` / `BATCH_INVOICE_ALLOCATION_VALUE_FIELD_MAP` / `BATCH_INVOICE_CUSTOM_FIELD_MAP` and `map_record()` |
-| `scripts/db.py` | Shared connection pool: one SQLAlchemy engine per process/database (`pool_size` = `MySql.PoolSize`, default 5; `pool_pre_ping`; `pool_recycle` 30 min; no overflow). `get_connection(cfg)` returns a pooled DBAPI connection (`close()` returns it to the pool) for transactional multi-table writes; `get_engine(cfg)` is the same engine for pandas; `set_autocommit(conn, bool)` sets it on the real driver connection (reset to `False` before `close()`); `dispose_engines()` closes the pool at the end of a run. A run holds 3 connections at once: main, `DbLogHandler`, and a CSV export |
+| `scripts/db.py` | Shared connection pool: one SQLAlchemy engine per process/database (`pool_size` = `MYSQL_POOL_SIZE`, default 5; `pool_pre_ping`; `pool_recycle` 30 min; no overflow). `get_connection(cfg)` returns a pooled DBAPI connection (`close()` returns it to the pool) for transactional multi-table writes; `get_engine(cfg)` is the same engine for pandas; `set_autocommit(conn, bool)` sets it on the real driver connection (reset to `False` before `close()`); `dispose_engines()` closes the pool at the end of a run. A run holds 3 connections at once: main, `DbLogHandler`, and a CSV export |
 | `scripts/auth_client.py` | `authenticate(cfg)` — calls the Authenticate API, returns the bearer token |
 | `scripts/invoice_client.py` | `get_invoice(cfg, token, invoice_number)` — calls the Get Invoice API; `get_payment_batches(cfg, token, from_date=None, to_date=None, page=1, ap_batch_name=None)` — calls the Get Payment Batches API, either by date window or by `ap_batch_name` (mutually exclusive); `get_invoice_list(cfg, token, payment_file_id, page)` — calls the Get Invoice List API |
 | `scripts/repository.py` | All DB read/write functions (see §5) |
 | `scripts/sync_payment_files.py` | `sync_payment_files(cursor, cfg, token, interface_id, from_date=None, to_date=None, ap_batch_name=None, run_log_id=None, conn=None)` — pulls new payment-file batches (Get Payment Batches API, saving the raw response records on `ap_run_log.payment_batches_response`, by date window or by a single `ap_batch_name`) into `ap_payment_file_details` (tracking columns + the raw API record + `run_log_id`, on the same row), then for each new batch pulls its invoice numbers (Get Invoice List API) into `ap_invoices` + each raw `invoiceAPBatchDetails[]` entry into `ap_batch_invoice_details` (its nested `allocationValues[]`/`custom[]` into their own child tables); paginates both APIs via `data.totalPages`. `from_date`/`to_date` default to `[today - GetPaymentBatches.LookbackDays, today]` when neither they nor `ap_batch_name` are given |
 | `scripts/process_invoices.py` | Main orchestrator — entry point for the full pipeline, takes `--interface-id` plus either optional trailing date argument(s) or `--ap-batch-name` (see §5, §7.5) |
 | `scripts/fetch_ap_invoices.py` | Standalone helper — reads `ap_invoices` into a pandas DataFrame (ad hoc use / debugging) |
-| `scripts/export_invoices_csv.py` | `export_ap_batch_csv()` — the AP output CSV the main pipeline generates per batch, driven by `interfaceconfiguration.Platform_DB_AP_Query` (see §8). Also still has the older `export_invoices_csv()`, joining `invoice_summary` → `invoice_detail` → `invoice_line_detail` → `invoice_service` → `invoice_charge` via `Output.Tables`, optionally scoped to one `invoice_process_uuid` — no longer called by the main pipeline, but still usable standalone (§7.8) |
+| `scripts/export_invoices_csv.py` | `export_ap_batch_csv()` — the AP output CSV the main pipeline generates per batch, driven by `interfaceconfiguration.Platform_DB_AP_Query` (see §8). The older `Output.Tables`-driven full export (`export_invoices_csv()`) was removed in v1.4.0 |
 | `scripts/delivery.py` | `upload_to_sftp()` puts the CSV on the SFTP server; `send_run_summary_email()` sends the one run-level summary email with every batch's CSV attached (the older per-batch `send_success_email()` / `send_failure_email()` remain but are no longer called by the main flow — see §8). All log their outcome. |
 | `scripts/secret_crypto.py` | `decrypt_secret()` — decrypts `enc:v1:<base64>` AES-256-GCM values written by the tracker into the `interfaceconfiguration` secret columns, keyed by the `INTERFACE_SECRET_KEY` env var; values without the prefix pass through as legacy plaintext. Called from `repository.py::load_interface_configuration()` |
 | `dags/invoice_sync_dag.py` | Airflow DAG — schedules `scripts/process_invoices.py:main(interface_id=INTERFACE_ID)` as a `PythonOperator` task |
@@ -453,10 +455,17 @@ else does.
 
 Configuration now comes from **two places**, merged at runtime:
 
-1. **`config/appsettings.yml`** — MySQL connection (needed to even reach the
-   database, so it can't live in the database itself), the Invoice API's
-   `BaseUri`/`GetInvoice` structure, `Output.Tables` (the CSV join
-   definition), and `Logging`. It also holds `Sftp`/`Email`/
+0. **Environment (`MYSQL_*`)** — the MySQL connection (needed to even reach
+   the database, so it can't live in the database itself): `MYSQL_HOST`,
+   `MYSQL_PORT` (3306), `MYSQL_USER`, `MYSQL_PASSWORD`, `MYSQL_DATABASE`,
+   `MYSQL_POOL_SIZE` (5). `config.py` reads them from the process environment
+   and, for anything not set there, from the project-root `.env` (its own file,
+   independent of the tracker -- see `.env.example`) or the file named by the
+   `PIPELINE_ENV_FILE` variable. That file also holds `INTERFACE_SECRET_KEY`.
+   A missing variable stops config loading with a message naming it. Keep the
+   env file out of git (`.env` is in `.gitignore`).
+1. **`config/appsettings.yml`** — the Invoice API's `BaseUri`/endpoints and
+   `Logging.Level`. It can also hold `Sftp`/`Email`/
    `InvoiceApi.Authentication` blocks, but those now act only as **fallback
    defaults** for any column an interface's `interfaceconfiguration` row
    leaves `NULL`.
@@ -494,18 +503,10 @@ the DB row on top.
 
 ```yaml
 Logging:
-  Folder: logs
   Level: INFO
 
-MySql:
-  Host: localhost
-  User: sa
-  Password: Augday@11
-  Database: airflow
-  PoolSize: 5   # optional; max pooled connections per process (a run needs 3)
-
 InvoiceApi:
-  BaseUri: https://gatewayinternal.testapps.com
+  BaseUri: https://gatewayinternal.testapps.com   # per-interface override: Platform_InstanceUrl
   Authentication:
     Endpoint: /api/v2/Authenticate
   GetInvoice:
@@ -521,27 +522,13 @@ InvoiceApi:
     Endpoint: /api/v2/invoices/invoiceAPBatchesDetails
     PageSize: 50
     Expand: true
-
-Output:
-  Folder: output
-  FileName: invoices_export.csv
-  Tables:
-    - Name: invoice_summary
-      JoinOn:
-      Query: SELECT * FROM invoice_summary
-    - Name: invoice_detail
-      JoinOn: invoice_id
-      Query: SELECT * FROM invoice_detail
-    - Name: invoice_line_detail
-      JoinOn: detail_id
-      Query: SELECT * FROM invoice_line_detail
-    - Name: invoice_service
-      JoinOn: line_detail_id
-      Query: SELECT * FROM invoice_service
-    - Name: invoice_charge
-      JoinOn: service_pk
-      Query: SELECT * FROM invoice_charge
 ```
+
+There is no `MySql`, `Output` or `Logging.Folder` section: DB settings come
+from `MYSQL_*` (above), the output folder from `interfaceconfiguration.Output_Directory`
+(required — `process_invoices.py` and the DAG preflight fail with a clear
+message if it is empty), header row from `IncludeHeader`, and file names are
+built in code (§8).
 
 `InvoiceApi.Authentication.ClientApiKey`/`LoginUserName`/`Password` and the
 `Sftp`/`Email` blocks were removed from this file — they're expected to come
@@ -549,16 +536,8 @@ from `interfaceconfiguration` now. They can still be added back here (in the
 same shape as before) as a fallback for any column not yet populated for a
 given interface.
 
-`Output.Tables` drives the CSV join entirely from config — no table names or
-SQL are hardcoded in `export_invoices_csv.py`. The first entry is the base
-table (must be `invoice_summary`, the only table carrying
-`invoice_process_uuid`, for run-scoping to work), every entry after it is
-left-joined onto the running result on its `JoinOn` column. `Query` defaults to
-`SELECT * FROM <Name>` but can be any SQL string, e.g. to select specific
-columns — it must still return the `JoinOn` column for that entry.
-
-`Logging.Folder`/`Output.Folder` may be relative (resolved against the project
-root) or absolute; both are created automatically if missing.
+The output folder may be relative (resolved against the project root) or
+absolute; it is created automatically if missing.
 
 ---
 
@@ -820,12 +799,14 @@ root) or absolute; both are created automatically if missing.
 
 ### `scripts/export_invoices_csv.py`
 - Uses the shared pooled engine from `db.get_engine()` (no per-export engine create/dispose).
-- `build_ap_batch_filename(template: str, ap_batch_date) -> str` — resolves
-  `interfaceconfiguration.Email_Attachment_FileName` (e.g.
-  `"CBTS_{ap_batch_date}"`) against one batch's `ap_created_date`, formatted
-  `mmddyyyy` (e.g. `"CBTS_09012026"`). Falls back to today's date (logged as a
-  warning) if that batch has no `ap_created_date`. Appends `.csv` if the
-  template doesn't already end in an extension.
+- `build_ap_batch_filename(template, ap_batch_date, interface_name="") -> str` —
+  the CSV name for one batch: `<interface_name>_<mmddyyyy>.csv` from the batch's
+  `ap_created_date` (`ap_batch_<mmddyyyy>.csv` if the interface has no name).
+  `interfaceconfiguration.Email_Attachment_FileName` is now an **optional
+  override** template using `{ap_batch_date}`, `{interface_name}` and
+  `{filename}` (the default name, so a legacy `{filename}` value resolves to
+  it). Falls back to today's date (logged) if the batch has no
+  `ap_created_date`. Appends `.csv` if there is no extension.
 - `export_ap_batch_csv(cfg: AppConfig, payment_file_detail_id: int, ap_batch_date) -> str` —
   the AP output CSV the main pipeline generates per batch (§1 step 9). Runs
   `cfg.platform_db_ap_query` (`interfaceconfiguration.Platform_DB_AP_Query`)
@@ -834,28 +815,9 @@ root) or absolute; both are created automatically if missing.
   query isn't configured for the running interface. Writes the result via
   `build_ap_batch_filename()` + `resolve_output_path()`, returns the path
   written.
-- `build_export_filename(cfg, timestamp=None, suffix=None) -> str` — the
-  **older** naming scheme, still used by `export_invoices_csv()` below (not
-  by `export_ap_batch_csv()`): `Output.FileName`'s base + optional `_<suffix>`
-  (the payment file's batch name, sanitized) + `_<ddMMyyyy_hhmmss>` +
-  extension, prefixed with `Job.OutputPrefix` + `_` when set (sourced from
-  `interfaceconfiguration.InterfaceName` for whichever `--interface-id` is
-  running -- see §4).
-- `resolve_output_path(cfg, filename=None) -> str` — resolves `Output.Folder`
-  into an absolute path, creating it if needed.
-- `build_invoice_export(engine, tables, invoice_process_uuid=None) -> pd.DataFrame` —
-  **older**, `Output.Tables`-driven full export, no longer called by the main
-  pipeline (superseded by `export_ap_batch_csv()`) but still usable standalone
-  (§7.8). When `invoice_process_uuid` is given, the base table's query is
-  wrapped in `SELECT * FROM (<query>) AS scoped_base WHERE
-  invoice_process_uuid = %(invoice_process_uuid)s` before the rest of the
-  tables are left-joined on — everything downstream inherits the scoping
-  through `invoice_id`. Without it, the base table is read unfiltered (used by
-  `python scripts/export_invoices_csv.py` standalone).
-- `export_invoices_csv(cfg=None, invoice_process_uuid=None, filename_suffix=None) -> str` —
-  **older**, runs `build_invoice_export()` and writes it via
-  `DataFrame.to_csv(index=False)`; returns the path written. No longer called
-  by the main pipeline — see `export_ap_batch_csv()` above.
+- `resolve_output_path(cfg, filename) -> str` — joins `cfg.output.folder`
+  (`interfaceconfiguration.Output_Directory`) with the file name, creating the
+  folder if needed; raises `RuntimeError` if the folder isn't set.
 
 ### `scripts/delivery.py`
 - `upload_to_sftp(cfg: SftpConfig, local_path, filename) -> str` — opens a
@@ -1122,14 +1084,8 @@ Prints the current contents of `ap_invoices` (filtered to `ap_paymentfile_id =
 1001` in the current query — edit `QUERY` in `scripts/fetch_ap_invoices.py` as
 needed).
 
-### 7.8 Export all invoice data to CSV standalone (no run scoping)
-```bash
-python scripts/export_invoices_csv.py
-```
-`process_invoices.py` already generates a scoped export per payment file
-(§7.5), so this is only needed to regenerate an **unscoped** CSV covering the
-entire `invoice_summary` table's history — e.g. after manually editing
-`Output.Tables`, or for ad hoc reporting.
+### 7.8 (removed)
+The standalone unscoped full-history export (`python scripts/export_invoices_csv.py`) and its `Output.Tables` config were removed in v1.4.0; use `Platform_DB_AP_Query` per batch (§7.5).
 
 ### 7.9 Step-through debugging in VS Code
 `.vscode/launch.json` ships with 6 ready-made debug configurations, so you can
@@ -1167,8 +1123,8 @@ older than the versions that introduced the `debugpy` debug type — change
 
 - **Config resolution order**: `interfaceconfiguration` (DB, per `--interface-id`)
   overlays `config/appsettings.yml` (fallback defaults) — see §4. MySQL
-  connection settings are the one exception: they must stay in
-  `appsettings.yml`/environment, since the pipeline needs them just to reach
+  connection settings are the one exception: they come from the `MYSQL_*`
+  environment / project `.env`, since the pipeline needs them just to reach
   the database that `interfaceconfiguration` lives in.
 - **DB access pattern**: `scripts/process_invoices.py` uses a raw
   `mysql.connector` connection/cursor (not SQLAlchemy) so it can rely on
@@ -1386,8 +1342,7 @@ older than the versions that introduced the `debugpy` debug type — change
   to stop re-templating the filename a second time, since it's now already
   fully resolved before reaching that function. The old `Output.Tables`-driven
   `export_invoices_csv()`/`build_invoice_export()`/`build_export_filename()`
-  are unchanged and still usable standalone (§7.8) — just no longer called by
-  the main pipeline. Since `Platform_DB_AP_Query`/`Email_Attachment_FileName`
+  were removed in v1.4.0. Since `Platform_DB_AP_Query`/`Email_Attachment_FileName`
   are read per-interface (same overlay mechanism as every other
   `interfaceconfiguration` column, see §4), a different interface can use a
   completely different query and filename pattern with no code changes — the
@@ -1399,7 +1354,7 @@ older than the versions that introduced the `debugpy` debug type — change
   (`Output.IncludeHeader` → `cfg.output.include_header`, boolean, default
   `true`) controls whether the generated CSV's first row is a header —
   `DataFrame.to_csv(..., header=cfg.output.include_header)` in both
-  `export_ap_batch_csv()` and the older `export_invoices_csv()`.
+  `export_ap_batch_csv()`.
 - **Per-batch emails replaced with one run-level summary email**
   (2026-09-21): `process_payment_file()` no longer calls `send_success_email`/
   `send_failure_email` itself — it returns a result dict (`batch_name`,

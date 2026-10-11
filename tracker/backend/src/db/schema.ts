@@ -48,7 +48,7 @@ export async function assertSchema(): Promise<void> {
   const [rows] = await pool.query<RowDataPacket[]>(
     `SELECT table_name AS t, column_name AS c FROM information_schema.columns
       WHERE table_schema = ?`,
-    [env.DB_NAME],
+    [env.MYSQL_DATABASE],
   );
   const present = new Set(rows.map((r) => `${String(r.t).toLowerCase()}.${String(r.c).toLowerCase()}`));
 

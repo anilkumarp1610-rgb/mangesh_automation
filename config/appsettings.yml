@@ -1,16 +1,14 @@
+# Database settings are NOT here: they come from the MYSQL_* environment variables
+# (MYSQL_HOST, MYSQL_PORT, MYSQL_USER, MYSQL_PASSWORD, MYSQL_DATABASE, MYSQL_POOL_SIZE),
+# loaded from the project-root .env (see .env.example) or the file named by PIPELINE_ENV_FILE.
+# Output folder, header and CSV file name, and Invoice API login credentials come
+# from the interfaceconfiguration row (see README section 4).
+
 Logging:
-  Folder: logs
   Level: INFO
 
-MySql:
-  Host: localhost
-  User: sa
-  Password: Augday@11
-  Database: airflow
-  PoolSize: 5   # max pooled connections per process (main + log handler + CSV export need 3)
-
 InvoiceApi:
-  BaseUri: https://gatewayinternal.testapps.com
+  BaseUri: https://gatewayinternal.testapps.com   # per-interface override: Platform_InstanceUrl
 
   Authentication:
     Endpoint: /api/v2/Authenticate
@@ -21,45 +19,14 @@ InvoiceApi:
     PageSize: 50
     Expand: true
 
-  # Pulls new AP payment-file batches (Step 1 of the sync). LookbackDays widens
-  # the fromDate/toDate window so a batch created near a run boundary isn't missed.
+  # LookbackDays widens the fromDate/toDate window so a batch created near a
+  # run boundary isn't missed.
   GetPaymentBatches:
     Endpoint: /api/v2/invoices/invoiceAPBatches
     PageSize: 50
     LookbackDays: 1
 
-  # Pulls the invoice numbers under one payment-file batch (Step 3 of the sync),
-  # keyed by the upstream paymentFileId returned from GetPaymentBatches.
   GetInvoiceList:
     Endpoint: /api/v2/invoices/invoiceAPBatchesDetails
     PageSize: 50
     Expand: true
-
-Output:
-  Folder: output
-  FileName: invoices_export.csv
-
-  # Tables combined into the single export CSV, in join order. The first entry is
-  # the base table (its JoinOn is ignored); every entry after that is left-joined
-  # onto the running result using its own JoinOn column.
-  # Query is optional: if omitted, it defaults to "SELECT * FROM <Name>". Set it to
-  # any valid SQL string to select specific columns (or add WHERE/ORDER BY/etc.) --
-  # it is run verbatim, so it MUST still return the JoinOn column for that entry
-  # (except the base table, which has no JoinOn requirement).
-  Tables:
-    - Name: invoice_summary
-      JoinOn:
-      Query: SELECT * FROM invoice_summary
-    - Name: invoice_detail
-      JoinOn: invoice_id
-      Query: SELECT * FROM invoice_detail
-    - Name: invoice_line_detail
-      JoinOn: detail_id
-      Query: SELECT * FROM invoice_line_detail
-    - Name: invoice_service
-      JoinOn: line_detail_id
-      Query: SELECT * FROM invoice_service
-    - Name: invoice_charge
-      JoinOn: service_pk
-      Query: SELECT * FROM invoice_charge
-

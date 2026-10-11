@@ -75,6 +75,10 @@ def preflight(**context):
         cursor.close()
     finally:
         conn.close()
+    if not values.get("Output.Folder"):
+        raise ValueError(
+            f"interfaceconfiguration.Output_Directory is not set for InterfaceId={interface_id}"
+        )
     log.info(
         "Preflight OK: interface_id=%s resolved %d config overlay key(s)",
         interface_id,

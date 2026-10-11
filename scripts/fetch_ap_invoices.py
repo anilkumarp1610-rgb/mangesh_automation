@@ -1,22 +1,17 @@
 import pandas as pd
-from sqlalchemy import create_engine
-from urllib.parse import quote_plus
 
-DB_HOST = "localhost"
-DB_USER = "sa"
-DB_PASSWORD = "Augday@11"
-DB_NAME = "airflow"
+from config import load_config
+from db import dispose_engines, get_engine
 
-QUERY = "SELECT * FROM airflow.ap_invoices Where ap_paymentfile_id = 1001  ;"
+QUERY = "SELECT * FROM ap_invoices WHERE ap_paymentfile_id = 1001"
 
 
 def fetch_ap_invoices() -> pd.DataFrame:
-    engine = create_engine(
-        f"mysql+mysqlconnector://{DB_USER}:{quote_plus(DB_PASSWORD)}@{DB_HOST}/{DB_NAME}"
-    )
-    df = pd.read_sql(QUERY, engine)
-    engine.dispose()
-    return df
+    """DB settings come from the MYSQL_* environment / the project .env (see config.py)."""
+    try:
+        return pd.read_sql(QUERY, get_engine(load_config().mysql))
+    finally:
+        dispose_engines()
 
 
 if __name__ == "__main__":

@@ -20,12 +20,12 @@ const schema = z.object({
         .filter(Boolean),
     ),
 
-  DB_HOST: z.string().default('localhost'),
-  DB_PORT: z.coerce.number().int().positive().default(3306),
-  DB_USER: z.string().min(1),
-  DB_PASSWORD: z.string().default(''),
-  DB_NAME: z.string().min(1),
-  DB_CONNECTION_LIMIT: z.coerce.number().int().positive().default(10),
+  MYSQL_HOST: z.string().default('localhost'),
+  MYSQL_PORT: z.coerce.number().int().positive().default(3306),
+  MYSQL_USER: z.string().min(1),
+  MYSQL_PASSWORD: z.string().default(''),
+  MYSQL_DATABASE: z.string().min(1),
+  MYSQL_CONNECTION_LIMIT: z.coerce.number().int().positive().default(10),
 
   // Optional in P1/P2; required once interface secret encryption (P3) is enabled.
   INTERFACE_SECRET_KEY: z.string().optional(),
