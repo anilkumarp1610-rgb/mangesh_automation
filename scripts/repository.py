@@ -144,21 +144,25 @@ def load_interface_configuration(cursor: MySQLCursor, interface_id: int) -> dict
     return values
 
 
-def get_open_payment_files(cursor: MySQLCursor, interface_id: int) -> list:
+def get_open_payment_files(cursor: MySQLCursor, interface_id: int, run_log_id: int) -> list:
+    """Open ('New') payment files pulled by THIS run only (run_log_id) -- 'New'
+    rows left behind by an earlier run that died before processing them are
+    deliberately not picked up."""
     cursor.execute(
         """
         SELECT id, ap_batch_name, ap_batch_payment_file_id, interface_id, ap_batch_status,
-               ap_created_date
+               ap_created_date, run_log_id
         FROM ap_payment_file_details
-        WHERE interface_id = %s AND ap_batch_status = 'New'
+        WHERE interface_id = %s AND run_log_id = %s AND ap_batch_status = 'New'
         """,
-        (interface_id,),
+        (interface_id, run_log_id),
     )
     rows = cursor.fetchall()
     logger.debug(
-        "ap_payment_file_details: %d row(s) with ap_batch_status='New' for interface_id=%s",
+        "ap_payment_file_details: %d row(s) with ap_batch_status='New' for interface_id=%s, run_log_id=%s",
         len(rows),
         interface_id,
+        run_log_id,
     )
     return rows
 
@@ -228,10 +232,13 @@ def insert_payment_file(
     return payment_file_detail_id
 
 
-def insert_ap_invoice(cursor: MySQLCursor, payment_file_detail_id: int, invoice_number: str) -> int:
+def insert_ap_invoice(
+    cursor: MySQLCursor, payment_file_detail_id: int, invoice_number: str, run_log_id: int = None
+) -> int:
     data = {
         "ap_invoice_number": invoice_number,
         "ap_paymentfile_id": payment_file_detail_id,
+        "run_log_id": run_log_id,
     }
     result = insert(cursor, "ap_invoices", data)
     logger.debug("insert_ap_invoice: success (ap_invoice_id=%s)", result)
@@ -273,23 +280,34 @@ def insert_batch_invoice_custom(
     return result
 
 
-def get_invoice_numbers_for_payment_file(cursor: MySQLCursor, payment_file_detail_id: int) -> list:
+def get_invoice_ids_by_number(
+    cursor: MySQLCursor, payment_file_detail_id: int, run_log_id: int
+) -> dict:
+    """{ap_invoice_number: [ap_invoice_id, ...]} for one payment file of this run, in id order.
+    Normally one id per number; more than one only if the upstream invoice list
+    repeats a number within the batch. Callers make one Get Invoice call per
+    number and update every id listed for it."""
     cursor.execute(
         """
-        SELECT DISTINCT ap_invoice_number
+        SELECT ap_invoice_id, ap_invoice_number
         FROM ap_invoices
-        WHERE ap_paymentfile_id = %s AND ap_invoice_number IS NOT NULL
+        WHERE ap_paymentfile_id = %s AND run_log_id = %s AND ap_invoice_number IS NOT NULL
+        ORDER BY ap_invoice_id
         """,
-        (payment_file_detail_id,),
+        (payment_file_detail_id, run_log_id),
     )
-    rows = cursor.fetchall()
-    invoice_numbers = [row["ap_invoice_number"] if isinstance(row, dict) else row[0] for row in rows]
+    ids_by_number = {}
+    for row in cursor.fetchall():
+        invoice_id, number = (
+            (row["ap_invoice_id"], row["ap_invoice_number"]) if isinstance(row, dict) else row
+        )
+        ids_by_number.setdefault(number, []).append(invoice_id)
     logger.debug(
-        "ap_invoices: %d invoice number(s) found for ap_paymentfile_id=%s",
-        len(invoice_numbers),
+        "ap_invoices: %d distinct invoice number(s) found for ap_paymentfile_id=%s",
+        len(ids_by_number),
         payment_file_detail_id,
     )
-    return invoice_numbers
+    return ids_by_number
 
 
 def start_batch_run(cursor: MySQLCursor, payment_file_detail_id: int) -> str:
@@ -431,17 +449,25 @@ def insert_invoice_charge(cursor: MySQLCursor, service_pk: int, charge_record: d
 
 def update_ap_invoice_status(
     cursor: MySQLCursor,
-    invoice_number: str,
+    ap_invoice_ids: list,
+    payment_file_detail_id: int,
+    run_log_id: int,
     api_status: str,
     response_obj,
     response_status_code: int,
 ) -> None:
-    sql = """
+    """Updates exactly the given ap_invoices rows: by primary key, additionally
+    pinned to this payment file and run. Never match on ap_invoice_number: a
+    re-pulled batch gets new rows with the same numbers, and those belong to
+    other payment files / runs."""
+    sql = f"""
         UPDATE ap_invoices
         SET ap_invoice_api_status = %s,
             api_response_obj = %s,
             api_response_status_code = %s
-        WHERE ap_invoice_number = %s
+        WHERE ap_invoice_id IN ({", ".join(["%s"] * len(ap_invoice_ids))})
+          AND ap_paymentfile_id = %s
+          AND run_log_id = %s
     """
     cursor.execute(
         sql,
@@ -449,12 +475,16 @@ def update_ap_invoice_status(
             api_status,
             json.dumps(response_obj) if response_obj is not None else None,
             response_status_code,
-            invoice_number,
+            *ap_invoice_ids,
+            payment_file_detail_id,
+            run_log_id,
         ),
     )
     logger.debug(
-        "update_ap_invoice_status: success (invoice_number=%s, api_status=%s)",
-        invoice_number,
+        "update_ap_invoice_status: success (ap_invoice_ids=%s, payment_file=%s, run_log_id=%s, api_status=%s)",
+        ap_invoice_ids,
+        payment_file_detail_id,
+        run_log_id,
         api_status,
     )
 

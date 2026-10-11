@@ -25,6 +25,16 @@ def _to_api_datetime(d, end_of_day: bool = False) -> str:
     return datetime.combine(d, time_part).strftime(_API_DATETIME_FORMAT)
 
 
+def resolve_date_window(cfg: AppConfig, from_date=None, to_date=None):
+    """The (from_date, to_date) GetPaymentBatches window a run uses: to_date
+    defaults to today (UTC), from_date to to_date minus LookbackDays."""
+    if to_date is None:
+        to_date = datetime.now(timezone.utc).date()
+    if from_date is None:
+        from_date = to_date - timedelta(days=cfg.invoice_api.get_payment_batches.lookback_days)
+    return from_date, to_date
+
+
 def _fetch_all_pages(call, api_label: str) -> list:
     """call(page) -> requests.Response for one page; follows data.totalPages
     until every page has been collected."""
@@ -99,7 +109,6 @@ def sync_payment_files(
     run_log_id ties every ap_payment_file_details row inserted this run back to
     the ap_run_log row main() created at the start of the run (see
     repository.insert_run_log)."""
-    batches_cfg = cfg.invoice_api.get_payment_batches
     if ap_batch_name:
         logger.info(
             "Payment file sync: pulling payment batch %r for InterfaceId=%s",
@@ -113,10 +122,7 @@ def sync_payment_files(
             "Get Payment Batches API",
         )
     else:
-        if to_date is None:
-            to_date = datetime.now(timezone.utc).date()
-        if from_date is None:
-            from_date = to_date - timedelta(days=batches_cfg.lookback_days)
+        from_date, to_date = resolve_date_window(cfg, from_date, to_date)
 
         logger.info(
             "Payment file sync: pulling payment batches from %s to %s for InterfaceId=%s",
@@ -202,7 +208,7 @@ def sync_payment_files(
             # ap_invoices row could possibly reference it yet. invoice_numbers is
             # already deduplicated within this run via the set() built above.
             for invoice_number in sorted(invoice_numbers):
-                insert_ap_invoice(cursor, payment_file_detail_id, invoice_number)
+                insert_ap_invoice(cursor, payment_file_detail_id, invoice_number, run_log_id=run_log_id)
             logger.info(
                 "Payment file sync: stored %d invoice number(s) for %s",
                 len(invoice_numbers),

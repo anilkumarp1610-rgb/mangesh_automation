@@ -7,13 +7,13 @@ from auth_client import authenticate
 from config import load_config
 from db import get_connection
 from db_log_handler import DbLogHandler
-from delivery import send_run_summary_email, upload_to_sftp
+from delivery import send_no_batch_email, send_run_summary_email, upload_to_sftp
 from export_invoices_csv import export_ap_batch_csv
 from invoice_client import get_invoice
 from log_context import current_payment_file_detail_id
 from logging_config import LOG_FORMAT, setup_logging
 from repository import (
-    get_invoice_numbers_for_payment_file,
+    get_invoice_ids_by_number,
     get_open_payment_files,
     insert_response_log,
     insert_run_log,
@@ -23,7 +23,7 @@ from repository import (
     update_ap_invoice_status,
     update_payment_file_status,
 )
-from sync_payment_files import sync_payment_files
+from sync_payment_files import resolve_date_window, sync_payment_files
 
 logger = logging.getLogger(__name__)
 
@@ -40,8 +40,10 @@ def process_invoice(
     api_cfg,
     token: str,
     invoice_number: str,
+    ap_invoice_ids: list,
     invoice_process_uuid: str,
     ap_payment_file_detail_id: int,
+    run_log_id: int,
 ) -> str:
     logger.info("Invoice %s -- calling Get Invoice API", invoice_number)
     response = get_invoice(api_cfg, token, invoice_number)
@@ -84,7 +86,9 @@ def process_invoice(
     )
     update_ap_invoice_status(
         cursor,
-        invoice_number=invoice_number,
+        ap_invoice_ids=ap_invoice_ids,
+        payment_file_detail_id=ap_payment_file_detail_id,
+        run_log_id=run_log_id,
         api_status=api_status,
         response_obj=payload,
         response_status_code=response.status_code,
@@ -146,7 +150,10 @@ def process_payment_file(conn, cursor, cfg, token: str, payment_file: dict) -> d
                 batch_name,
                 payment_file_detail_id,
             )
-            invoice_numbers = get_invoice_numbers_for_payment_file(cursor, payment_file_detail_id)
+            invoice_ids_by_number = get_invoice_ids_by_number(
+                cursor, payment_file_detail_id, payment_file["run_log_id"]
+            )
+            invoice_numbers = list(invoice_ids_by_number)
             if not invoice_numbers:
                 logger.warning("Payment file %s: no invoices found -- nothing to process", batch_name)
             else:
@@ -158,7 +165,14 @@ def process_payment_file(conn, cursor, cfg, token: str, payment_file: dict) -> d
             status_counts = {"SUCCESS": 0, "PENDING": 0, "FAILED": 0}
             for invoice_number in invoice_numbers:
                 status = process_invoice(
-                    cursor, cfg.invoice_api, token, invoice_number, invoice_process_uuid, payment_file_detail_id
+                    cursor,
+                    cfg.invoice_api,
+                    token,
+                    invoice_number,
+                    invoice_ids_by_number[invoice_number],
+                    invoice_process_uuid,
+                    payment_file_detail_id,
+                    payment_file["run_log_id"],
                 )
                 status_counts[status] = status_counts.get(status, 0) + 1
                 conn.commit()
@@ -393,12 +407,17 @@ def main(
                 interface_id,
             )
 
-            logger.info("Step 3: querying open ('New') payment files for InterfaceId=%s", interface_id)
-            payment_files = get_open_payment_files(cursor, interface_id)
             logger.info(
-                "Step 3: found %d open ('New') payment file(s) for InterfaceId=%s",
+                "Step 3: querying open ('New') payment files for InterfaceId=%s, run_log_id=%s",
+                interface_id,
+                run_log_id,
+            )
+            payment_files = get_open_payment_files(cursor, interface_id, run_log_id)
+            logger.info(
+                "Step 3: found %d open ('New') payment file(s) for InterfaceId=%s, run_log_id=%s",
                 len(payment_files),
                 interface_id,
+                run_log_id,
             )
         except Exception:
             logger.exception(
@@ -406,6 +425,31 @@ def main(
                 interface_id,
             )
             raise
+
+        if not payment_files:
+            logger.warning(
+                "No AP batch found for InterfaceId=%s, run_log_id=%s -- sending no-batch email",
+                interface_id,
+                run_log_id,
+            )
+            email_from, email_to = (None, None)
+            if not ap_batch_name:
+                email_from, email_to = resolve_date_window(cfg, from_date, to_date)
+            try:
+                send_no_batch_email(
+                    cfg.email,
+                    cfg.job.output_prefix,
+                    interface_id,
+                    run_log_id,
+                    datetime.now().strftime("%m/%d/%Y"),
+                    from_date=email_from,
+                    to_date=email_to,
+                    ap_batch_name=ap_batch_name,
+                    api_batch_count=len(new_payment_file_detail_ids),
+                )
+                logger.info("No-batch email sent (or skipped -- Email.Enabled=false)")
+            except Exception:
+                logger.exception("No-batch email could not be sent")
 
         batch_results = [
             process_payment_file(conn, cursor, cfg, token, payment_file)

@@ -104,6 +104,61 @@ def send_failure_email(cfg: EmailConfig, filename: str, error: Exception) -> Non
     )
 
 
+_NO_BATCH_SUBJECT = "[{interface_name}] No AP batch found - {run_date}"
+_NO_BATCH_BODY = """\
+<p>The AP invoice run for <b>{interface_name}</b> (Interface ID {interface_id}, Run Log ID {run_log_id}) \
+completed on {run_date} but found <b>no AP batch to process</b>.</p>
+<table border="1" cellpadding="4" cellspacing="0">
+<tr><td><b>Interface</b></td><td>{interface_name} (ID {interface_id})</td></tr>
+<tr><td><b>Run Log ID</b></td><td>{run_log_id}</td></tr>
+<tr><td><b>Search criteria</b></td><td>{criteria}</td></tr>
+<tr><td><b>Batches returned by API</b></td><td>{api_batch_count}</td></tr>
+</table>
+<p>No CSV was generated and nothing was uploaded to SFTP for this run.</p>
+"""
+
+
+def send_no_batch_email(
+    cfg: EmailConfig,
+    interface_name: str,
+    interface_id: int,
+    run_log_id: int,
+    run_date: str,
+    from_date=None,
+    to_date=None,
+    ap_batch_name: str = None,
+    api_batch_count: int = 0,
+) -> None:
+    """Standard notification, identical for every interface, for a run whose
+    run_log_id produced no AP batch to process. Uses the interface's normal
+    Email_* sender/recipients/SMTP settings and Email.Enabled; the subject and
+    body are fixed templates (_NO_BATCH_SUBJECT/_NO_BATCH_BODY) so a newly
+    configured interface needs no extra setup. The search criteria shown are
+    what the run was asked for: the batch name, or the from/to window."""
+    if ap_batch_name:
+        criteria = f"AP batch name: {ap_batch_name}"
+    elif from_date and to_date:
+        criteria = f"From {from_date} to {to_date}" if from_date != to_date else f"Date {from_date}"
+    else:
+        criteria = "Default window"
+    format_args = dict(
+        interface_name=interface_name,
+        interface_id=interface_id,
+        run_log_id=run_log_id,
+        run_date=run_date,
+        criteria=criteria,
+        api_batch_count=api_batch_count,
+    )
+    _send_message(
+        cfg,
+        _NO_BATCH_SUBJECT.format(**format_args),
+        _NO_BATCH_BODY.format(**format_args),
+        cfg.recipients_to,
+        cfg.recipients_cc,
+        html=True,
+    )
+
+
 def send_run_summary_email(
     cfg: EmailConfig,
     interface_name: str,

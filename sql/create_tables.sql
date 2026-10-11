@@ -62,6 +62,27 @@ CREATE TABLE IF NOT EXISTS interfaceconfiguration (
     UNIQUE KEY UQ_InterfaceConfiguration_InterfaceName (InterfaceName)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
+-- 0a-0. AP Run Log (one row per process_invoices.py invocation, inserted and
+-- committed on its own at the very start of main() -- before interface config
+-- is loaded, before auth, before anything else -- so it survives even if the
+-- run fails later. Captures exactly what was passed on the CLI: interface_id
+-- always, plus either from_date/to_date, or ap_batch_name (--ap-batch-name),
+-- or neither (default GetPaymentBatches.LookbackDays window) -- whichever
+-- weren't used stay NULL. ap_payment_file_details.run_log_id below ties every
+-- batch pulled in a run back to this row; ap_invoices.run_log_id
+-- does the same for each invoice row (so updates can be scoped to the run); the
+-- deeper tables (invoice_summary/detail/etc.) are reachable via
+-- ap_payment_file_details. Defined before ap_invoices because it is FK-referenced.
+CREATE TABLE IF NOT EXISTS ap_run_log (
+    id                          BIGINT AUTO_INCREMENT PRIMARY KEY,
+    interface_id                INT NOT NULL,
+    from_date                   DATETIME,
+    to_date                     DATETIME,
+    ap_batch_name               VARCHAR(200),
+    started_at                  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    KEY ix_run_log_interface_id (interface_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
 -- 0. AP Invoices Table (source list of invoices to process + last API call outcome)
 CREATE TABLE IF NOT EXISTS ap_invoices (
     ap_invoice_id               BIGINT AUTO_INCREMENT PRIMARY KEY,
@@ -71,29 +92,12 @@ CREATE TABLE IF NOT EXISTS ap_invoices (
     ap_invoice_api_status       VARCHAR(50),
     api_response_obj            JSON,
     api_response_status_code    INT,
+    run_log_id                  BIGINT,
     KEY ix_ap_invoices_invoice_number (ap_invoice_number),
-    KEY ix_ap_invoices_paymentfile_id (ap_paymentfile_id)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-
--- 0a-0. AP Run Log (one row per process_invoices.py invocation, inserted and
--- committed on its own at the very start of main() -- before interface config
--- is loaded, before auth, before anything else -- so it survives even if the
--- run fails later. Captures exactly what was passed on the CLI: interface_id
--- always, plus either from_date/to_date, or ap_batch_name (--ap-batch-name),
--- or neither (default GetPaymentBatches.LookbackDays window) -- whichever
--- weren't used stay NULL. ap_payment_file_details.run_log_id below ties every
--- batch pulled in a run back to this row; every deeper table (ap_batch_invoice_
--- details, ap_invoices, invoice_summary/detail/line_detail/service/charge, etc.)
--- is already reachable from ap_payment_file_details via existing FKs, so this
--- is the only place run_log_id needs to live.
-CREATE TABLE IF NOT EXISTS ap_run_log (
-    id                          BIGINT AUTO_INCREMENT PRIMARY KEY,
-    interface_id                INT NOT NULL,
-    from_date                   DATETIME,
-    to_date                     DATETIME,
-    ap_batch_name               VARCHAR(200),
-    started_at                  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    KEY ix_run_log_interface_id (interface_id)
+    KEY ix_ap_invoices_paymentfile_id (ap_paymentfile_id),
+    KEY ix_ap_invoices_run_log_id (run_log_id),
+    CONSTRAINT fk_ap_invoices_run_log FOREIGN KEY (run_log_id)
+        REFERENCES ap_run_log (id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 -- 0a. AP Payment File Details (one row per payment-file batch; ap_batch_status

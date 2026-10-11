@@ -20,6 +20,11 @@ has been processed, one summary email goes out listing all of them together
 (batch names, total invoice count, all output filenames, every CSV
 attached) — see §8.
 
+A companion web app, the **AP Tracker** (`tracker/`, React + Node), sits on top
+of the same MySQL database: it manages `interfaceconfiguration`, monitors runs,
+batches, API calls and stored invoice data, and can reprocess a single batch
+on demand — see [§9](#9-ap-tracker-web-app) and [`tracker/README.md`](tracker/README.md).
+
 ## Contents
 
 - [1. Architecture / Process Flow](#1-architecture--process-flow)
@@ -41,6 +46,7 @@ attached) — see §8.
   - [7.8 Export all invoice data to CSV standalone (no run scoping)](#78-export-all-invoice-data-to-csv-standalone-no-run-scoping)
   - [7.9 Step-through debugging in VS Code](#79-step-through-debugging-in-vs-code)
 - [8. Technical Notes](#8-technical-notes)
+- [9. AP Tracker (web app)](#9-ap-tracker-web-app)
 
 ---
 
@@ -54,7 +60,8 @@ flowchart TD
     IC --> STEP12["Load interface config<br/><small>process_invoices.py --interface-id</small>"]
     STEP12 --> AUTH["Authenticate<br/><small>auth_client.py</small>"]
     AUTH --> SYNC["Step 2a — Sync from upstream API<br/><small>sync_payment_files.py<br/>date window, or a single --ap-batch-name</small>"]
-    SYNC --> FIND["Step 3 — Find open payment files<br/><small>ap_batch_status = 'New'</small>"]
+    SYNC --> FIND["Step 3 — Find open payment files<br/><small>ap_batch_status = 'New' AND run_log_id = this run</small>"]
+    FIND -->|none found| NOBATCH["Send 'No AP batch found' email<br/><small>standard subject/body, any interface</small>"]
     FIND --> LOOP1
 
     subgraph LOOP1["for each open payment file (process_payment_file)"]
@@ -112,12 +119,18 @@ each step are:
      tables.
 5. **Step 3 — Find open payment files**
    (`repository.py::get_open_payment_files()`):
-   `SELECT * FROM ap_payment_file_details WHERE interface_id = ? AND ap_batch_status = 'New'`.
+   `SELECT * FROM ap_payment_file_details WHERE interface_id = ? AND run_log_id = ? AND ap_batch_status = 'New'`.
+   Only the batches pulled by **this run's** `ap_run_log.id` are processed —
+   `New` rows left behind by an earlier run that died before processing them
+   are deliberately ignored (they stay `New`; nothing cleans them up).
+   If this finds **no** batch, `delivery.py::send_no_batch_email()` sends a
+   standard "No AP batch found" email (see step 11a) and the run ends.
 
 **For each open payment file** (`process_invoices.py::process_payment_file`):
 
 6. **Step 4 — Pull invoices for this payment file** —
-   `SELECT DISTINCT ap_invoice_number FROM ap_invoices WHERE ap_paymentfile_id = <payment file's id>`.
+   `SELECT ap_invoice_id, ap_invoice_number FROM ap_invoices WHERE ap_paymentfile_id = <payment file's id> AND run_log_id = <this run>`
+   (grouped into `{invoice_number: [ap_invoice_id, ...]}`).
 7. **Step 5 — Start the run** (`repository.py::start_batch_run()`) —
    `UPDATE ap_payment_file_details SET invoice_process_uuid = ? WHERE id = ?`
    — a freshly generated UUID recorded on the batch row before any invoice is
@@ -126,7 +139,7 @@ each step are:
 8. **Step 6 — Process every invoice in this batch**
    (`process_invoices.py::process_invoice`) — for each `invoice_number`:
    - Get Invoice API call → `invoice_response_log` (+ `invoice_process_uuid`)
-   - update `ap_invoices` (status / raw response)
+   - update `ap_invoices` (status / raw response) — `WHERE ap_invoice_id IN (...) AND ap_paymentfile_id = ? AND run_log_id = ?`
    - on `SUCCESS`: `invoice_summary` (+ `invoice_process_uuid`,
      `ap_payment_file_detail_id`) → `invoice_detail` → `invoice_line_detail`
      → `invoice_service` → `invoice_charge`
@@ -148,6 +161,17 @@ each step are:
     lists every batch processed (names, total invoice count, output
     filenames, comma-joined) with every batch's CSV attached, in one HTML
     email. Replaces the older per-batch success/failure emails (see §8).
+
+11a. **No-batch email** (`main()`, right after step 3, only when this run's
+    `run_log_id` has no open batch — `delivery.py::send_no_batch_email()`) —
+    applies to all four run modes (interface only, `--ap-batch-name`, a single
+    date, a from/to range). Same sender, recipients (`Email_Recipients_To/Cc`)
+    and `Email_Enabled` as the summary email, but a **fixed subject/body**
+    (`[<interface>] No AP batch found - <date>`) so a newly configured
+    interface needs no extra setup. The body shows the interface name/ID, run
+    log id, the search criteria (the batch name, `Date X`, or `From X to Y` —
+    for a default run, the actual lookback window used), and how many batches
+    the API returned. A failed send is logged and does not fail the run.
 
 ---
 
@@ -174,9 +198,16 @@ mangesh_automation/
 │   ├── process_invoices.py    main orchestrator (entry point)
 │   ├── fetch_ap_invoices.py   standalone ap_invoices reader
 │   ├── export_invoices_csv.py AP output CSV (Platform_DB_AP_Query-driven, per batch) + the older Output.Tables-driven full export (standalone, §7.8)
-│   └── delivery.py            SFTP upload + run-level summary email (see §8)
+│   ├── delivery.py            SFTP upload + run-level summary email (see §8)
+│   └── secret_crypto.py       AES-256-GCM decrypt_secret() for tracker-encrypted interfaceconfiguration secrets (§7.4, §9)
 ├── dags/
-│   └── invoice_sync_dag.py    Airflow DAG that runs process_invoices.main(interface_id=...)
+│   ├── invoice_sync_dag.py              Airflow DAG, hard-coded INTERFACE_ID, runs process_invoices.main(...)
+│   ├── invoice_sync_parametrized_dag.py same, interface id from Airflow Variable invoice_sync_interface_id
+│   └── invoice_execution_dag.py         preflight check -> run; interface id from Variable invoice_execution_interface_id
+├── docs/
+│   ├── dag-deployment.md               deployment runbook for the Airflow DAG
+│   └── function-execution-reference.md call order / inputs / outputs of every Python function
+├── tracker/                   AP Tracker web app (backend: Node/Express/TS, frontend: React/Vite) -- see §9
 ├── sql/
 │   ├── create_tables.sql                   full DDL for a fresh install + seed data
 │   ├── migrate_payment_file_processing.sql catch-up ALTERs for a pre-existing DB
@@ -189,6 +220,7 @@ mangesh_automation/
 │   ├── update_email_summary_template.sql   sets Email_Subject/Email_Body to the run-summary HTML template
 │   ├── migrate_merge_ap_batch_details.sql  folds a retired 1:1 table into ap_payment_file_details
 │   ├── migrate_merge_ap_invoices_process_log.sql  folds a retired run-history table into ap_payment_file_details
+│   ├── add_run_log_id_to_ap_invoices.sql   adds ap_invoices.run_log_id (+ index, FK -> ap_run_log); run on an existing DB
 │   ├── drop_aprequestpaymentdetails.sql    drops a retired legacy table
 │   └── drop_aprequestdetails.sql           drops a retired legacy table
 ├── output/                    generated AP output CSVs land here (see Output config)
@@ -289,6 +321,7 @@ erDiagram
         bigint ap_invoice_id PK
         varchar ap_invoice_number
         int ap_paymentfile_id "no FK"
+        bigint run_log_id FK
         varchar ap_invoice_api_status
         json api_response_obj
     }
@@ -346,7 +379,7 @@ else does.
 | `interfaceconfiguration` | One wide row per interface (SFTP/SMTP/Invoice API/email settings) | `InterfaceId` (PK) |
 | `ap_run_log` | One row per `process_invoices.py` invocation, inserted and committed on its own at the very start of `main()` — before interface config is loaded, before auth, before anything else — so it survives even if the run fails later. Captures exactly what was passed on the CLI: `interface_id` always, plus either `from_date`/`to_date`, or `ap_batch_name` (`--ap-batch-name`), or neither (default `GetPaymentBatches.LookbackDays` window) — whichever weren't used stay `NULL` | anchors `ap_payment_file_details.run_log_id` and `ap_process_log.run_log_id` |
 | `ap_process_log` | One row per log record emitted anywhere in the pipeline during a run (any module, any level) — replaces file-based logging entirely, see §8. `ap_payment_file_detail_id` is set when the record was emitted from inside a batch's processing block, `NULL` for run-level lines | `run_log_id` → `ap_run_log.id` (FK) · `ap_payment_file_detail_id` → `ap_payment_file_details.id` (**no FK, deliberately** — see §8, avoids a cross-connection lock wait against that row's uncommitted insert) |
-| `ap_invoices` | Source list of invoices to process; also stores the last API call outcome | `ap_paymentfile_id` → `ap_payment_file_details.id` |
+| `ap_invoices` | Source list of invoices to process; also stores the last API call outcome. `run_log_id` records the run that pulled the row | `ap_paymentfile_id` → `ap_payment_file_details.id` · `run_log_id` → `ap_run_log.id` |
 | `ap_payment_file_details` | One row per payment-file batch **per sync pull** — `ap_batch_payment_file_id` is *not* unique; the same upstream batch gets a fresh row (and is fully reprocessed) every run that its `paymentFileId` still falls inside the sync window, see §8. `ap_batch_status` (`New`/`Success`/`Failure`) drives the foreach loop. `invoice_process_uuid` holds the current run's UUID (merged in from a separate `ap_invoices_process_log` table, see §8) and is threaded into `invoice_response_log` and `invoice_summary`. `run_log_id` ties this row back to the `ap_run_log` row for the run that pulled it (nullable — rows inserted before this column existed have no run to point to). Also carries the raw Get Payment Batches API record for that batch (`client`, `ap_payment_file_status`, `no_of_invoices`, `no_of_vendors`, `earliest_due_date`, `currency`, `invoice_amount`, `allocated_amount`, `detail_invoice_amount`, `fetched_datetime`) — merged in from a separate `ap_batch_details` table, see §8 | `interface_id` → `interfaceconfiguration.InterfaceId` · `run_log_id` → `ap_run_log.id` |
 | `ap_batch_invoice_details` | Raw `invoiceAPBatchDetails[]` entry from the Get Invoice List API — flat invoice-line fields (org/vendor/dates/amounts) | `ap_payment_file_detail_id` → `ap_payment_file_details.id` |
 | `ap_batch_invoice_allocation_values` | `invoiceAPBatchDetails[].allocationValues[]` child rows | `batch_invoice_detail_id` → `ap_batch_invoice_details.id` |
@@ -391,8 +424,13 @@ else does.
 | `scripts/process_invoices.py` | Main orchestrator — entry point for the full pipeline, takes `--interface-id` plus either optional trailing date argument(s) or `--ap-batch-name` (see §5, §7.5) |
 | `scripts/fetch_ap_invoices.py` | Standalone helper — reads `ap_invoices` into a pandas DataFrame (ad hoc use / debugging) |
 | `scripts/export_invoices_csv.py` | `export_ap_batch_csv()` — the AP output CSV the main pipeline generates per batch, driven by `interfaceconfiguration.Platform_DB_AP_Query` (see §8). Also still has the older `export_invoices_csv()`, joining `invoice_summary` → `invoice_detail` → `invoice_line_detail` → `invoice_service` → `invoice_charge` via `Output.Tables`, optionally scoped to one `invoice_process_uuid` — no longer called by the main pipeline, but still usable standalone (§7.8) |
-| `scripts/delivery.py` | `upload_to_sftp()` puts the CSV on the SFTP server; `send_success_email()` / `send_failure_email()` send the configured email template with the CSV attached. Both log their outcome. |
+| `scripts/delivery.py` | `upload_to_sftp()` puts the CSV on the SFTP server; `send_run_summary_email()` sends the one run-level summary email with every batch's CSV attached (the older per-batch `send_success_email()` / `send_failure_email()` remain but are no longer called by the main flow — see §8). All log their outcome. |
+| `scripts/secret_crypto.py` | `decrypt_secret()` — decrypts `enc:v1:<base64>` AES-256-GCM values written by the tracker into the `interfaceconfiguration` secret columns, keyed by the `INTERFACE_SECRET_KEY` env var; values without the prefix pass through as legacy plaintext. Called from `repository.py::load_interface_configuration()` |
 | `dags/invoice_sync_dag.py` | Airflow DAG — schedules `scripts/process_invoices.py:main(interface_id=INTERFACE_ID)` as a `PythonOperator` task |
+| `dags/invoice_sync_parametrized_dag.py` | Same, but the interface id comes from the Airflow Variable `invoice_sync_interface_id` (default 1) |
+| `dags/invoice_execution_dag.py` | `preflight` task (DB reachable + active `interfaceconfiguration` row) followed by `run_invoice_sync`; interface id from the Variable `invoice_execution_interface_id` (default 1) |
+| `docs/dag-deployment.md` / `docs/function-execution-reference.md` | Airflow deployment runbook / per-function execution reference |
+| `tracker/` | The AP Tracker web app (see §9) |
 | `sql/create_tables.sql` | Full DDL for every table (fresh-install shape) + seed rows for `ap_invoices` / `ap_payment_file_details` |
 | `sql/migrate_payment_file_processing.sql` | Catch-up `ALTER TABLE` statements for a database that already has these tables in their older shape |
 | `sql/create_invoice_response_log.sql` | Standalone DDL for just `invoice_response_log` |
@@ -538,14 +576,16 @@ root) or absolute; both are created automatically if missing.
   `interfaceconfiguration` row for `InterfaceId = interface_id`
   (`IsActive = 1`), maps its columns onto dotted config keys (see §4); raises
   `ValueError` if no active row exists for that id.
-- `get_open_payment_files(cursor, interface_id: int) -> list` — `SELECT id,
+- `get_open_payment_files(cursor, interface_id: int, run_log_id: int) -> list` — `SELECT id,
   ap_batch_name, ap_batch_payment_file_id, interface_id, ap_batch_status,
   ap_created_date FROM ap_payment_file_details WHERE interface_id = ? AND
-  ap_batch_status = 'New'` — `ap_created_date` is included so
+  run_log_id = ? AND ap_batch_status = 'New'` — scoped to the current run, so
+  stale `New` rows from earlier runs are never picked up. `ap_created_date` is included so
   `process_payment_file()` can derive `APBatchDate` for the CSV filename
   (see §8) without a second query.
-- `get_invoice_numbers_for_payment_file(cursor, payment_file_detail_id: int) -> list` —
-  distinct `ap_invoice_number`s under that payment file.
+- `get_invoice_ids_by_number(cursor, payment_file_detail_id: int, run_log_id: int) -> dict` —
+  `{ap_invoice_number: [ap_invoice_id, ...]}` for that payment file and run. One Get
+  Invoice call is made per number; every id listed for it is updated.
 - `insert_run_log(cursor, interface_id, from_date=None, to_date=None, ap_batch_name=None) -> int` —
   inserts one `ap_run_log` row marking the start of a run: the interface being
   processed and exactly what was passed on the CLI (whichever of
@@ -562,9 +602,9 @@ root) or absolute; both are created automatically if missing.
   amounts, etc.) on the same row (formerly a separate `ap_batch_details`
   table — merged in, see §8). `run_log_id` ties this row back to the
   `ap_run_log` row for the run that pulled it.
-- `insert_ap_invoice(cursor, payment_file_detail_id, invoice_number) -> int` —
-  inserts a new `ap_invoices` row for an invoice number just pulled from the
-  Get Invoice List API.
+- `insert_ap_invoice(cursor, payment_file_detail_id, invoice_number, run_log_id=None) -> int` —
+  inserts a new `ap_invoices` row (tagged with the run's `run_log_id`) for an
+  invoice number just pulled from the Get Invoice List API.
 - `insert_batch_invoice_detail(cursor, payment_file_detail_id, batch_name, detail_record) -> int` —
   maps + inserts one `invoiceAPBatchDetails[]` entry's flat fields into
   `ap_batch_invoice_details`.
@@ -592,7 +632,10 @@ root) or absolute; both are created automatically if missing.
 - `insert_invoice_line_detail(cursor, detail_id, service_total_count) -> int`
 - `insert_invoice_service(cursor, line_detail_id, service_record) -> int`
 - `insert_invoice_charge(cursor, service_pk, charge_record) -> int`
-- `update_ap_invoice_status(cursor, invoice_number, api_status, response_obj, response_status_code) -> None`
+- `update_ap_invoice_status(cursor, ap_invoice_ids: list, payment_file_detail_id, run_log_id, api_status, response_obj, response_status_code) -> None` —
+  `UPDATE ap_invoices ... WHERE ap_invoice_id IN (...) AND ap_paymentfile_id = ? AND run_log_id = ?`: keyed by primary key
+  (also pinned to the payment file and run), never by `ap_invoice_number`, because a re-pulled batch gets new rows with the
+  same invoice numbers and those belong to other payment files / runs.
 - `store_invoice_record(cursor, record, log_id, invoice_process_uuid, ap_payment_file_detail_id) -> None` —
   orchestrates one full record: summary → detail → (clear old nested rows) →
   line_detail → service → charge.
@@ -824,6 +867,12 @@ root) or absolute; both are created automatically if missing.
   block, one row per batch, for a template that wants a per-batch table
   instead of one combined row). Attaches every batch's CSV. No-ops if
   `Email.Enabled` is false or `batch_results` is empty.
+- `send_no_batch_email(cfg: EmailConfig, interface_name, interface_id, run_log_id, run_date, from_date=None, to_date=None, ap_batch_name=None, api_batch_count=0) -> None` —
+  called by `main()` when the run's `run_log_id` has no open batch (step 11a).
+  Fixed HTML subject/body templates (`_NO_BATCH_SUBJECT`/`_NO_BATCH_BODY`),
+  independent of `Email_Subject`/`Email_Body`; sent to `Email.Recipients.To/Cc`.
+  The criteria line is the batch name if given, else `Date X` / `From X to Y`.
+  No-ops if `Email.Enabled` is false.
 - `send_success_email(cfg: EmailConfig, filename, output_path) -> None` /
   `send_failure_email(cfg: EmailConfig, filename, error: Exception) -> None` —
   **no longer called by the main pipeline** (superseded by
@@ -845,6 +894,17 @@ root) or absolute; both are created automatically if missing.
 - Defines DAG `invoice_sync_dag` (`schedule_interval="@daily"`, `catchup=False`)
   with a single `PythonOperator` task calling
   `process_invoices.main(interface_id=INTERFACE_ID)`.
+
+### `dags/invoice_sync_parametrized_dag.py`, `dags/invoice_execution_dag.py`
+- `invoice_sync_parametrized_dag` — same single-task shape, but reads the
+  interface id from the Airflow Variable `invoice_sync_interface_id`
+  (`airflow variables set invoice_sync_interface_id 1`).
+- `invoice_execution_dag` — two tasks, `preflight >> run_invoice_sync`.
+  `preflight` fails fast (before any API call) if the DB is unreachable or the
+  interface's `interfaceconfiguration` row is missing/inactive. Interface id
+  comes from the Variable `invoice_execution_interface_id`; `max_active_runs=1`.
+- Deploy only one of the three per schedule unless you want independent runs
+  (distinct `dag_id`s). Details: [`docs/dag-deployment.md`](docs/dag-deployment.md).
 
 </details>
 
@@ -959,9 +1019,13 @@ for Invoice API auth, `Platform_InstanceUrl` for the base URI, `Email_*`). Any
 column left `NULL` falls back to `config/appsettings.yml`'s `Sftp`/`Email`/
 `InvoiceApi.Authentication` blocks if present there.
 
-> [!WARNING]
-> These secret columns are **plaintext today** — encrypting them at rest is
-> a separate, not-yet-scheduled follow-up.
+> [!NOTE]
+> The five secret columns (`SFTP_Password`, `SMTP_Password`, `Platform_Password`,
+> `Platform_AppAuthKey`, `Platform_DB_Password`) may be stored encrypted
+> (`enc:v1:<base64>`, AES-256-GCM) when written through the tracker. Set the
+> **same** `INTERFACE_SECRET_KEY` environment variable (32 bytes, base64 or hex)
+> for the pipeline as the tracker backend uses; `scripts/secret_crypto.py`
+> decrypts on read. Plaintext values written by hand still work unchanged.
 
 ### 7.5 Run the pipeline directly
 ```bash
@@ -1016,10 +1080,12 @@ explicitly (`"found 0 open ('New') payment file(s)"`), and queryable via
 `SELECT * FROM ap_process_log WHERE run_log_id = <id> ORDER BY id`.
 
 ### 7.6 Run the pipeline via Airflow
-Copy or symlink `dags/invoice_sync_dag.py` (and the `scripts/` + `config/`
+Copy or symlink one of the DAG files in `dags/` (`invoice_sync_dag.py`,
+`invoice_sync_parametrized_dag.py` or `invoice_execution_dag.py`) (and the `scripts/` + `config/`
 folders it depends on) into your Airflow deployment's `dags/` folder, or point
-`dags_folder` at this project's `dags/` directory. Adjust `INTERFACE_ID` in
-`invoice_sync_dag.py` for the interface that DAG should run. `apache-airflow`
+`dags_folder` at this project's `dags/` directory. For `invoice_sync_dag.py`, adjust `INTERFACE_ID`; for the other two, set the
+Airflow Variable (`invoice_sync_interface_id` / `invoice_execution_interface_id`).
+Full runbook: [`docs/dag-deployment.md`](docs/dag-deployment.md). `apache-airflow`
 must be installed in that environment (intentionally not in this project's
 `requirements.txt`).
 
@@ -1359,8 +1425,7 @@ older than the versions that introduced the `debugpy` debug type — change
 > `Platform_DB_AP_Query`, which **is** now wired up (§4, §8) but is read
 > against *this* pipeline's own tables (`ap_batch_invoice_details`/
 > `ap_batch_invoice_allocation_values`), not that separate external database.
-> Encrypting `interfaceconfiguration`'s plaintext secret columns is also not
-> yet implemented.
+> Secret columns *are* encrypted at rest when written by the tracker (§7.4, §9).
 
 - **Legacy tables retired**: `aprequestpaymentdetails` (`request_detail_id`,
   `request_id`, `payment_flie_id`, `ap_batch_name`) predated the Get Payment
@@ -1386,3 +1451,32 @@ older than the versions that introduced the `debugpy` debug type — change
 > TEXT` for the affected column(s).
 
 </details>
+
+---
+
+## 9. AP Tracker (web app)
+
+`tracker/` is a web app over the same MySQL `airflow` database (full design in
+[`tracker/PLAN.md`](tracker/PLAN.md), setup and phase status in
+[`tracker/README.md`](tracker/README.md)):
+
+- `tracker/backend` — Node 20+, Express, TypeScript, mysql2 (`npm run dev` on port 4000; `npm run migrate`, `npm run align-db`, `npm run seed:dev`).
+- `tracker/frontend` — React 18, Vite, Tailwind + shadcn/ui, TanStack Query/Table (`npm run dev` on port 5173, proxies `/api`).
+
+What it does today:
+
+| Area | Capability |
+|---|---|
+| Interfaces | List, create, edit, activate/deactivate `interfaceconfiguration`; secrets are AES-256-GCM encrypted on write and shown only as set/not-set |
+| AP Batches / Invoices | Browse `ap_payment_file_details` (filter by interface, run, client, created-date range, status) and drill to invoices, response logs and the stored invoice tree (summary → detail → lines → services → charges) |
+| Run Logs | One row per `process_invoices.py` invocation (`ap_run_log`) with a live-polling side sheet of its `ap_process_log` lines |
+| Reprocess | On a `Success`/`Failure` batch, spawns `process_invoices.py --interface-id <id> --ap-batch-name "<name>"` as a background process and jumps to the new run's log |
+| Dashboard | Month-wise New/Success/Failure batch chart |
+
+Still pending: AP batch/invoice creation (P4), whole-interface Airflow "Run now" (P5), SSO (auth seam only in `backend/src/middleware/auth.ts`).
+
+Integration points with the Python pipeline:
+
+- **Secrets** — the tracker and the pipeline must share `INTERFACE_SECRET_KEY` (`openssl rand -base64 32`); see §7.4.
+- **Schema** — the tracker needs `ap_payment_file_details.id` to be `AUTO_INCREMENT`; `sql/create_tables.sql` already is. For an existing DB run `npm run align-db` in `tracker/backend`. The backend checks the schema at startup (`assertSchema()`); if it reports the run/process-log tables missing, apply `sql/apply_logging_changes.sql`.
+- **Reprocess** — backend env vars `PIPELINE_PYTHON_EXECUTABLE`, `PIPELINE_SCRIPTS_DIR`, `PIPELINE_TRIGGER_POLL_TIMEOUT_MS` point it at this repo's `scripts/`.
