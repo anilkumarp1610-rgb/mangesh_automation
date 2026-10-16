@@ -77,6 +77,11 @@ class OutputConfig:
     # the generated CSV's first row is a header row; defaults true).
     folder: str = ""
     include_header: bool = True
+    # interfaceconfiguration.output_type -> "csv" (default), "xlsx" or "txt".
+    # Free text in the tracker UI ("Excel / CSV / Text"), so normalised
+    # leniently: contains "xls"/"excel" -> xlsx, "txt"/"text" -> txt (tab-
+    # delimited), anything else (incl. blank) -> csv.
+    type: str = "csv"
 
 
 @dataclass
@@ -145,6 +150,15 @@ class AppConfig:
     # parameterized with %(ap_payment_file_detail_id)s. Empty when not yet
     # configured for the running interface.
     platform_db_ap_query: str = ""
+
+
+def _normalize_output_type(value) -> str:
+    text = str(value or "").lower()
+    if any(k in text for k in ("xls", "excel")):
+        return "xlsx"
+    if any(k in text for k in ("txt", "text")):
+        return "txt"
+    return "csv"
 
 
 def _expand_env(value):
@@ -251,6 +265,7 @@ def load_config(path: str = APPSETTINGS_PATH, interface_values: dict | None = No
         output=OutputConfig(
             folder=output_raw.get("Folder", ""),
             include_header=output_raw.get("IncludeHeader", True),
+            type=_normalize_output_type(output_raw.get("Type")),
         ),
         job=JobConfig(output_prefix=job_raw.get("OutputPrefix", "")),
         sftp=SftpConfig(

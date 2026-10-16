@@ -28,7 +28,35 @@ the same checklist in the editor.
 
 ---
 
-## v1.4.0 — `pending` — 2026-10-11
+## v1.5.0 — `pending` — 2026-10-16
+**Output type (CSV / Excel / Text) now honoured**
+
+### Functional
+- The interface's Output Type was saved but ignored: every run wrote CSV. It now
+  controls the AP output file: `csv` (default), Excel (`.xlsx`) or Text (`.txt`,
+  tab-separated). The header row follows `IncludeHeader` for all three.
+- File extension follows the type; a `.csv`/`.xlsx`/`.xls`/`.txt` in
+  `Email_Attachment_FileName` is replaced to match. Email attachment and SFTP
+  upload use the generated file.
+- Tracker: Output Type placeholder is now "CSV / Excel / Text".
+
+### Technical
+- `repository.py`: `output_type` -> `Output.Type` overlay key.
+- `config.py`: `OutputConfig.type`, set by `_normalize_output_type()` (contains
+  "xls"/"excel" -> xlsx, "txt"/"text" -> txt, else csv).
+- `export_invoices_csv.py`: `build_ap_batch_filename(..., file_type)`;
+  export uses `to_excel` / `to_csv(sep="	")` / `to_csv`.
+- `requirements.txt`: `openpyxl`.
+
+### Deploy
+- `pip install -r requirements.txt` (adds `openpyxl`) on the Airflow environment.
+
+### Known limits
+- Output Type is free text in the tracker; unrecognised values fall back to CSV.
+
+---
+
+## v1.4.0 — `1298d0f` — 2026-10-11
 **DB settings from environment, per-interface output, legacy export removed**
 
 ### Functional
@@ -92,7 +120,7 @@ the same checklist in the editor.
 
 ---
 
-## v1.3.0 — `pending` — 2026-10-11
+## v1.3.0 — `1298d0f` — 2026-10-11
 **Add version history and a pre-commit hook that enforces it**
 
 ### Functional

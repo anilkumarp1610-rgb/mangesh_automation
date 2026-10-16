@@ -59,6 +59,7 @@ _STRING_COLUMN_KEY_MAP = {
     "Failure_Subject": "Email.FailureNotification.Subject",
     "Failure_Body": "Email.FailureNotification.Body",
     "Output_Directory": "Output.Folder",
+    "output_type": "Output.Type",
     "Platform_DB_AP_Query": "PlatformDb.ApQuery",
     # Replaces the old hardcoded Jobs.CBTS_AP.OutputPrefix lookup: whichever
     # interface is running gets its own name as the output filename prefix,

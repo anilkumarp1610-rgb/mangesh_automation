@@ -45,7 +45,7 @@ export const SECTIONS: FormSection[] = [
     fields: [
       { name: 'InterfaceName', label: 'Interface Name', type: 'text', placeholder: 'CBTS_AP' },
       { name: 'IsActive', label: 'Active', type: 'switch' },
-      { name: 'output_type', label: 'Output Type', type: 'text', placeholder: 'Excel / CSV' },
+      { name: 'output_type', label: 'Output Type', type: 'text', placeholder: 'CSV / Excel / Text' },
       { name: 'output_combined', label: 'Combine output into one file', type: 'switch' },
       { name: 'Output_Directory', label: 'Output Directory', type: 'text' },
       { name: 'Archive_Directory', label: 'Archive Directory', type: 'text' },

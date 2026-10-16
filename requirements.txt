@@ -6,3 +6,4 @@ pyyaml
 paramiko
 cryptography
 python-dotenv
+openpyxl

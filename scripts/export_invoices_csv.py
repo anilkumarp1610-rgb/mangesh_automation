@@ -12,7 +12,9 @@ logger = logging.getLogger(__name__)
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
-def build_ap_batch_filename(template: str, ap_batch_date, interface_name: str = "") -> str:
+def build_ap_batch_filename(
+    template: str, ap_batch_date, interface_name: str = "", file_type: str = "csv"
+) -> str:
     """CSV filename for one payment file, from its ap_created_date formatted
     mmddyyyy. Default: "<interface_name>_<mmddyyyy>.csv" (e.g. "CBTS_AP_09012026.csv";
     "ap_batch_<mmddyyyy>.csv" if the interface has no name). An interface can
@@ -20,7 +22,8 @@ def build_ap_batch_filename(template: str, ap_batch_date, interface_name: str = 
     using {ap_batch_date}, {interface_name} and {filename} (the default name
     above, so a legacy "{filename}" value resolves to it). Falls back to today's
     date, logged as a warning, if ap_created_date is missing for that batch.
-    Appends .csv if the result has no extension."""
+    The extension follows file_type ("csv"/"xlsx"/"txt"): appended if missing, and a
+    .csv/.xlsx/.xls/.txt extension from the template is replaced to match."""
     if not ap_batch_date:
         logger.warning(
             "build_ap_batch_filename: no ap_created_date for this batch -- falling back to today's date"
@@ -31,7 +34,12 @@ def build_ap_batch_filename(template: str, ap_batch_date, interface_name: str = 
     name = (template or "").strip().format(
         ap_batch_date=date_text, interface_name=interface_name, filename=default_name
     ) or default_name
-    return name if os.path.splitext(name)[1] else f"{name}.csv"
+    base, ext = os.path.splitext(name)
+    if not ext:
+        return f"{name}.{file_type}"
+    if ext.lower() in (".csv", ".xlsx", ".xls", ".txt"):
+        return f"{base}.{file_type}"
+    return name
 
 
 def resolve_output_path(cfg: AppConfig, filename: str) -> str:
@@ -78,10 +86,19 @@ def export_ap_batch_csv(cfg: AppConfig, payment_file_detail_id: int, ap_batch_da
     )
 
     filename = build_ap_batch_filename(
-        cfg.email.attachment.file_name, ap_batch_date, cfg.job.output_prefix
+        cfg.email.attachment.file_name, ap_batch_date, cfg.job.output_prefix, cfg.output.type
     )
     output_path = resolve_output_path(cfg, filename)
-    export_df.to_csv(output_path, index=False, header=cfg.output.include_header)
+    if cfg.output.type == "xlsx":
+        export_df.to_excel(
+            output_path, index=False, header=cfg.output.include_header, sheet_name="AP Batch"
+        )
+    elif cfg.output.type == "txt":
+        export_df.to_csv(
+            output_path, index=False, header=cfg.output.include_header, sep="\t"
+        )
+    else:
+        export_df.to_csv(output_path, index=False, header=cfg.output.include_header)
     logger.info(
         "AP batch export: wrote %d row(s) to %s (ap_payment_file_detail_id=%s)",
         len(export_df),
